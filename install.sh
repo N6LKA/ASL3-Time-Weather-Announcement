@@ -255,15 +255,37 @@ echo "--- Setting up hourly announcement cron ---"
 CRON_COMMENT="# Hourly Time and Weather Announcement"
 CRON_JOB="00 00-23 * * * /usr/bin/nice -19 /usr/bin/perl ${INSTALL_DIR}/saytime.pl ${WEATHER_LOCATION} ${NODE_NUMBER} >/dev/null 2>&1"
 
+# Remove any legacy saytime.pl entry from the root crontab (old installer put it there)
+ROOT_CRON=$(crontab -l 2>/dev/null || true)
+if echo "$ROOT_CRON" | grep -q "saytime\.pl"; then
+    echo -e "${YELLOW}Removing legacy saytime.pl entry from root crontab...${NC}"
+    NEW_ROOT_CRON=$(echo "$ROOT_CRON" | awk '
+        /[Tt]ime and [Ww]eather/ { skip=1; next }
+        /saytime\.pl/            { skip=0; next }
+        skip                     { next }
+        { print }
+    ')
+    echo "$NEW_ROOT_CRON" | crontab -
+    echo -e "${GREEN}Legacy root crontab entry removed.${NC}"
+fi
+
+# Add to asterisk crontab if not already present
 CURRENT_ASTERISK_CRON=$(crontab -u asterisk -l 2>/dev/null || true)
 
 if echo "$CURRENT_ASTERISK_CRON" | grep -q "saytime\.pl"; then
-    echo -e "${YELLOW}Existing saytime.pl cron entry found — skipping (no changes made).${NC}"
-    echo "To update the cron entry manually, run: crontab -u asterisk -e"
+    echo -e "${YELLOW}Existing saytime.pl entry found in asterisk crontab — skipping.${NC}"
+    echo "To update it manually: crontab -u asterisk -e"
 else
-    (echo "$CURRENT_ASTERISK_CRON"; echo ""; echo "$CRON_COMMENT"; echo "$CRON_JOB") | \
-        crontab -u asterisk -
-    echo -e "${GREEN}Cron job added to asterisk crontab (runs hourly at top of the hour).${NC}"
+    NEW_ASTERISK_CRON=$(echo "$CURRENT_ASTERISK_CRON"; echo ""; echo "$CRON_COMMENT"; echo "$CRON_JOB")
+    echo "$NEW_ASTERISK_CRON" | crontab -u asterisk -
+    # Verify it actually landed there
+    if crontab -u asterisk -l 2>/dev/null | grep -q "saytime\.pl"; then
+        echo -e "${GREEN}Cron job added to asterisk crontab (runs hourly at top of the hour).${NC}"
+    else
+        echo -e "${RED}WARNING: Failed to write to asterisk crontab. Add this line manually:${NC}"
+        echo "  crontab -u asterisk -e"
+        echo "  $CRON_JOB"
+    fi
 fi
 
 # --- Update plocate database ---

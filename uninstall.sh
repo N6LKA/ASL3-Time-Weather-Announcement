@@ -52,21 +52,30 @@ rm -f "$SYSTEMD_DIR/asl3-saytime-weather.service"
 systemctl daemon-reload
 echo -e "${GREEN}Systemd units removed.${NC}"
 
-# --- Remove cron entry from asterisk crontab ---
-echo "Removing saytime.pl cron entry from asterisk crontab..."
-CURRENT_CRON=$(crontab -u asterisk -l 2>/dev/null || true)
-if echo "$CURRENT_CRON" | grep -q "saytime\.pl"; then
-    NEW_CRON=$(echo "$CURRENT_CRON" | awk '
-        /[Tt]ime and [Ww]eather/ { skip=1; next }
-        /saytime\.pl/            { skip=0; next }
-        skip                     { next }
-        { print }
-    ')
-    echo "$NEW_CRON" | crontab -u asterisk -
-    echo -e "${GREEN}Cron entry removed.${NC}"
-else
-    echo "No saytime.pl cron entry found."
-fi
+# --- Remove cron entries (asterisk and root) ---
+echo "Removing saytime.pl cron entries..."
+
+remove_saytime_from_crontab() {
+    local label="$1"
+    shift
+    local current
+    current=$(crontab "$@" -l 2>/dev/null || true)
+    if echo "$current" | grep -q "saytime\.pl"; then
+        echo "$current" | awk '
+            /[Tt]ime and [Ww]eather/ { skip=1; next }
+            /saytime\.pl/            { skip=0; next }
+            skip                     { next }
+            { print }
+        ' | crontab "$@" -
+        echo -e "${GREEN}Removed from ${label} crontab.${NC}"
+    else
+        echo "No saytime.pl entry in ${label} crontab."
+    fi
+}
+
+remove_saytime_from_crontab "asterisk" -u asterisk
+remove_saytime_from_crontab "root"
+
 
 # --- Remove install directory ---
 if [[ -d "$INSTALL_DIR" ]]; then
