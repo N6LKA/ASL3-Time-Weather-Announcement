@@ -11,8 +11,9 @@
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 
-# Override by running: BRANCH=develop bash <(curl -fsSL .../main/install.sh)
-BRANCH="${BRANCH:-main}"
+# Default is set per-branch. After merging to main, use:
+#   BRANCH=develop bash <(curl -fsSL .../main/install.sh)
+BRANCH="${BRANCH:-develop}"
 REPO="https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/${BRANCH}"
 SOUND_ZIP_URL="${REPO}/sound_files.zip"
 
