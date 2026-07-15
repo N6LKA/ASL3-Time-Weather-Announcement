@@ -322,12 +322,13 @@ echo "Updating plocate database..."
 updatedb 2>/dev/null || true
 
 # --- Done ---
+VERSION=$(grep -oP '^\d+\.\d+\.\d+' "$REPO_TMP_DIR/version.txt" 2>/dev/null || echo "")
 echo ""
 echo "=============================================="
 if [[ "$EXISTING_INSTALL" == "true" ]]; then
-    echo -e "${GREEN}Update complete!${NC}"
+    echo -e "${GREEN}Update complete!${VERSION:+ (v${VERSION})}${NC}"
 else
-    echo -e "${GREEN}Installation complete!${NC}"
+    echo -e "${GREEN}Installation complete!${VERSION:+ (v${VERSION})}${NC}"
 fi
 echo ""
 echo "Install directory : $INSTALL_DIR"
