@@ -43,7 +43,7 @@ DESTDIR="/tmp"
 LOG="/tmp/weather-debug.log"
 
 # ---------- Logging ----------
-log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG" 2>/dev/null || true; }
+log(){ { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; } 2>/dev/null || true; }
 
 # ---------- Command Line Options ----------
 opt_config_file=""
