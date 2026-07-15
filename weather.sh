@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------------------------
-# Enhanced Weather Script for Global Operations - v2.7.4
+# Weather Script for ASL3 Time and Weather Announcement
+# https://github.com/N6LKA/ASL3-Time-Weather-Announcement
 #
 # Copyright 2025, Jory A. Pratt, W5GLE
 # Based on original work by D. Crompton, WA3DSP
 # Modified by:              Joe (KD2NFC)
-# Enhanced by:              W5GLE team for global operations
-# Date:                     2025-10-11
-# Version:                  2.7.4
+# Modified by:              Larry K. Aycock, N6LKA
+# Version:                  3.0.0
 #
 # Description:
 #   Global weather script with full feature parity to weather.pl:

@@ -1,16 +1,18 @@
 #!/bin/bash
 #
-# install.sh - Time and Weather Announcement Installer for ASL3
-# https://github.com/N6LKA/Time-Weather-Announce
+# install.sh - ASL3 Time and Weather Announcement Installer
+# https://github.com/N6LKA/ASL3-Time-Weather-Announcement
 #
 # Originally by Freddie Mac (KD5FMU) and Jory A. Pratt (W5GLE)
 # Modified and updated by Larry K. Aycock (N6LKA)
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, version 2 of the License.
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 
-REPO="https://raw.githubusercontent.com/N6LKA/Time-Weather-Announce/main"
+BRANCH="${BRANCH:-main}"
+REPO="https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/${BRANCH}"
 SOUND_ZIP_URL="${REPO}/sound_files.zip"
 
 BIN_DIR="/usr/local/sbin"
@@ -25,7 +27,7 @@ NC='\033[0m'
 echo ""
 echo "=============================================="
 echo "  Time and Weather Announcement - Installer"
-echo "  https://github.com/N6LKA/Time-Weather-Announce"
+echo "  https://github.com/N6LKA/ASL3-Time-Weather-Announcement"
 echo "=============================================="
 echo ""
 
