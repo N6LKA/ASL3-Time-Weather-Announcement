@@ -1,0 +1,12 @@
+[Unit]
+Description=ASL3 Saytime Weather Cache Update Timer
+Documentation=https://github.com/N6LKA/ASL3-Time-Weather-Announcement
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
