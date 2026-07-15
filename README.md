@@ -34,11 +34,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Anno
 ### Development / Testing (develop branch)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/develop/install.sh)
+BRANCH=develop bash <(curl -fsSL https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/develop/install.sh)
 ```
 
-> Once develop is merged to main, the dev install command becomes:
-> `BRANCH=develop bash <(curl -fsSL .../main/install.sh)`
+> After develop is merged to main, the dev install command becomes:
+> `BRANCH=develop bash <(curl -fsSL https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/main/install.sh)`
 
 The installer will prompt for:
 - **ZIP code or ICAO airport code** — your location (e.g. `90210` or `KJFK`)
