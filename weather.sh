@@ -43,7 +43,10 @@ DESTDIR="/tmp"
 LOG="/tmp/weather-debug.log"
 
 # ---------- Logging ----------
-log(){ { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; } 2>/dev/null || true; }
+# Ensure log is world-writable so both asterisk (systemd) and root can append.
+# Fall back to /dev/null if we can't create or chmod it.
+touch "$LOG" 2>/dev/null && chmod 666 "$LOG" 2>/dev/null || LOG="/dev/null"
+log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
 
 # ---------- Command Line Options ----------
 opt_config_file=""
