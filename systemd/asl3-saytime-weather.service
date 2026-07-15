@@ -1,0 +1,15 @@
+[Unit]
+Description=ASL3 Saytime Weather Cache Update
+Documentation=https://github.com/N6LKA/ASL3-Time-Weather-Announcement
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=asterisk
+Group=asterisk
+EnvironmentFile=/etc/asterisk/scripts/saytime-weather/weather-location.env
+ExecStart=/etc/asterisk/scripts/saytime-weather/weather.sh ${WEATHER_LOCATION}
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=asl3-saytime-weather

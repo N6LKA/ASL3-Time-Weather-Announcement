@@ -1,266 +1,320 @@
 #!/usr/bin/perl
 #
-# Copyright 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020 - saytime.pl  - D. Crompton, WA3DSP 11/30/2013
+# saytime.pl - ASL3 Time and Weather Announcement
+# https://github.com/N6LKA/ASL3-Time-Weather-Announcement
 #
-# Perl program to emulate and replace the app_rpt time of day
-# function call. This allows for easy changes and also volume and
-# tempo modifications.
+# Original author: D. Crompton, WA3DSP
+# Modified by: Larry K. Aycock, N6LKA
 #
-# Call this program from a cron job and/or rpt.conf when you want to
-# hear the time on your local node
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 #
-# Example Cron job to say the time on the hour every hour:
-#   Change directory and times to your liking
+# Usage:
+#   saytime.pl <locationID> <node>        - Announce time and weather
+#   saytime.pl <node>                     - Announce time only
+#   saytime.pl <locationID> <node> 1      - Build /tmp/current-time.gsm, no voice (for DTMF pre-build)
+#   saytime.pl <locationID> <node> 2      - Build weather-only gsm, no voice
 #
-# 00 0-23 * * * cd /etc/asterisk/wa3dsp; perl saytime.pl [<wxid>] <node> > /dev/null
+# weather.sh is called to refresh /tmp/temperature, /tmp/condition.gsm, etc.
+# When the systemd weather timer is active those files are already fresh and
+# weather.sh returns immediately without an API call.
 #
-# Note in this program all sound files must be .gsm
-# All combined soundfiile formats need to be the same.
-# This could be changed if necessary. To use this with the
-# stock Acid release you will need to convert a couple
-# of the ulaw files in the /sounds/rpt directory to .gsm
-# using sox or another conversion program and place them
-# in the sounds directory for use by this program.
-# The good-xxx.gsm files and the-time-is.gsm were created
-# from ulaw files in the /sounds/rpt directory.
-# An example sox command to do this is -
-#
-#  sox -t ul -r 8000 /var/lib/asterisk/sounds/rpt/thetimeis.ulaw /var/lib/asterisk/sounds/the-time-is.gsm
-
-# Added optional weather condition and temperature statement after time
-# WA3DSP 4/2017
-
-# Corrected temperature for eactly 100 Degrees.
-# WA3DSP 7/2017
-
-# For weather condtions and temperature Use:  saytime <locationID> <node>
-# Location ID is either your zipcode or nearest airport three letter designator
-# This REQUIRES the /usr/local/sbin/weather.sh script to run
-
-# WA3DSP 12/2019
-# Added header sound file. To add place wx_header sound file in /etc/asterisk/local
-# This sound file can be any playable sound file type - .ul,.gsm, etc.
-# EX: /etc/asterisk/local/wx_header.gsm,  /etc/asterisk/local/wx_header.ul
-# This will play the header sound file prior to time and optionally temperature/condition
-
-# WA3DSP 1/2020
-# Added optional third parameter to save time and weather "1" or
-# save just weather "2" gsm file. If the third parameter is present it will
-# not be voiced to the node only saved as /tmp/current-time.gsm
-# If the third parameter is not present or "0" time and temperature will
-# be voiced to the seleted node.
+# The weather cache files (/tmp/temperature, /tmp/condition.gsm, /tmp/feels-like,
+# /tmp/humidity) are owned by the systemd timer and are NOT deleted by this script.
 
 use strict;
 use warnings;
-#
-select (STDOUT);
-$| = 1;
-select (STDERR);
-$| = 1;
-#
-# Replace with your output directory
-my $outdir = "/tmp";
-#
-my $ampm = "PM";
-my $base = "/var/lib/asterisk/sounds";
-my $FNAME,my $error,my $day,my $hour,my $min,my $mynode,my $wx,my $wxid;
-my @proglist,my @list,my $sec,my $wday,my $mon,my $year,my $greet;
-my $year_1900,my $isdst,my $yday,my $min1,my $min10,my $localwxtemp10,my $localwxtemp1;
-my $filename,my $Silent=0;
-#
-# command-line args
-my $num_args = $#ARGV + 1;
-# if arg number is only 1, then arg = node, else arg1 is wx ID, arg2 is node
 
-if ($num_args == 1) {
-    $mynode=$ARGV[0];
-    $wx = "NO";
-    $error=0;
-} elsif ($num_args == 2) {
-    $wxid = ($ARGV[0]);
-    $wx = "YES";
-    $mynode=$ARGV[1];
-    $error=0;
-} elsif ($num_args == 3) {
-    if ($ARGV[2] < 0 || $ARGV[2] > 2) {
-	$error=1;
-    } else {
-	$error=0;
-    }
-    $wxid = ($ARGV[0]);
-    $wx = "YES";
-    $mynode=$ARGV[1];
-    $Silent=$ARGV[2];
-} else {
-    $error=1;
+select(STDOUT); $| = 1;
+select(STDERR); $| = 1;
+
+my $outdir  = "/tmp";
+my $base    = "/usr/local/share/asterisk/sounds/custom";
+my $confdir = "/etc/asterisk/scripts/saytime-weather";
+my $wxsh    = "$confdir/weather.sh";
+
+# Fall back to legacy path if not installed yet
+unless (-f $wxsh) {
+    $wxsh = "/usr/local/sbin/weather.sh";
 }
 
-if ($error == 1) {
-  print "\nUsage: saytime.pl [<locationid>] nodenumber [1=save time and wx, 2=save wx - both no voice]\n\n";
-  exit;
-}
+# ---------- Read config ----------
+my $time_format      = "12";
+my $announce_feels   = "no";
+my $announce_humidity = "no";
 
-my $localwxtemp="";
+my @conf_paths = (
+    "$confdir/weather.ini",
+    "/etc/asterisk/local/weather.ini",
+);
 
-if (! -f "/usr/local/sbin/weather.sh" ) {
-     $wx="NO";
-}
-
-if ($wx eq "YES") {
-
-  @proglist = ("/usr/local/sbin/weather.sh", $wxid);
-  system(@proglist);
-
-  if (-f "$outdir/temperature") {
-    open(my $fh, '<', "$outdir/temperature") or die "cannot open file";
-    {
-        local $/;
-        $localwxtemp = <$fh>;
+for my $cf (@conf_paths) {
+    next unless -f $cf;
+    open(my $fh, '<', $cf) or next;
+    while (<$fh>) {
+        chomp;
+        s/#.*//;
+        s/^\s+|\s+$//g;
+        next unless length;
+        if (/^TIME_FORMAT\s*=\s*"?(\d+)"?/)      { $time_format = $1; }
+        if (/^ANNOUNCE_FEELS_LIKE\s*=\s*"?(\w+)"?/) { $announce_feels = lc($1); }
+        if (/^ANNOUNCE_HUMIDITY\s*=\s*"?(\w+)"?/)   { $announce_humidity = lc($1); }
     }
     close($fh);
-  } else {
-    $localwxtemp="";
-  }
+    last;
 }
 
-#
+# ---------- Arguments ----------
+my $num_args = scalar @ARGV;
+my ($wxid, $mynode, $Silent) = ("", "", 0);
+my $wx = "NO";
+my $error = 0;
 
-$filename = '/etc/asterisk/local/saytime_header';
-if ( <$filename.*> ) {
-	@proglist = ("/usr/sbin/asterisk", "-rx", "rpt localplay " . $mynode . " /etc/asterisk/local/saytime_header");
-	system(@proglist);
+if ($num_args == 1) {
+    $mynode = $ARGV[0];
+} elsif ($num_args == 2) {
+    $wxid   = $ARGV[0];
+    $wx     = "YES";
+    $mynode = $ARGV[1];
+} elsif ($num_args == 3) {
+    $wxid   = $ARGV[0];
+    $wx     = "YES";
+    $mynode = $ARGV[1];
+    $Silent = $ARGV[2];
+    if ($Silent < 0 || $Silent > 2) { $error = 1; }
+} else {
+    $error = 1;
 }
 
-@list = ($sec,$min,$hour,$day,$mon,$year_1900,$wday,$yday,$isdst)=localtime;
-#
-if ($Silent != "2") {
-#
-if ($hour < 12) {
-  $greet = "Good Morning";
-  $ampm = "AM";
-  $FNAME = $base . "/good-morning.gsm ";
- }
-elsif ($hour >= 12 && $hour < 18) {
-  $greet = "Good Afternoon";
-  $FNAME = $base . "/good-afternoon.gsm ";
- }
-else {
-  $greet = "Good Evening";
-  $FNAME = $base . "/good-evening.gsm ";
+if ($error) {
+    print "\nUsage: saytime.pl [<locationid>] <nodenumber> [0|1|2]\n";
+    print "  0 (default) = voice to node\n";
+    print "  1 = save time+weather to /tmp/current-time.gsm, no voice\n";
+    print "  2 = save weather-only to /tmp/current-time.gsm, no voice\n\n";
+    exit 1;
 }
 
-if ($hour > 12) { $hour = $hour-12 };
-if ($hour == 0) { $hour = 12 };
-$FNAME = $FNAME . $base . "/the-time-is.gsm ";
-$FNAME = $FNAME . $base . "/digits/" . $hour . ".gsm ";
+unless (-f $wxsh) {
+    $wx = "NO";
+}
 
-if ($min != 0) {
-#  $FNAME = $FNAME . $base . "/digits/oclock.gsm ";
-# } else {
-  if ($min < 10) {
-    $FNAME = $FNAME . $base . "/digits/oh.gsm ";
-    $FNAME = $FNAME . $base . "/digits/" . $min . ".gsm ";
-  }
-  elsif ($min < 20) {
-    $FNAME = $FNAME . $base . "/digits/" . $min . ".gsm ";
-  } else {
-    $min10 = substr ($min,0,1) . "0";
-    $FNAME = $FNAME . $base . "/digits/" . $min10 . ".gsm ";
-    $min1 = substr ($min,1,1);
-    if ($min1 > 0) {
-      $FNAME = $FNAME . $base . "/digits/" . $min1 . ".gsm ";
+# ---------- Refresh weather cache ----------
+# weather.sh exits 0 immediately if cache is already fresh (systemd timer case).
+# If cache is stale it fetches and writes /tmp/temperature, /tmp/condition.gsm, etc.
+# Run as the asterisk user so file ownership is consistent with the systemd timer.
+# When already running as asterisk (cron) this is a no-op passthrough.
+if ($wx eq "YES") {
+    if ($> == 0) {
+        system("runuser", "-u", "asterisk", "--", $wxsh, $wxid);
+    } else {
+        system($wxsh, $wxid);
     }
-  }
 }
 
-if ($ampm =~ "AM") {
-  $FNAME = $FNAME . $base . "/digits/a-m.gsm ";
-} else {
-  $FNAME = $FNAME . $base . "/digits/p-m.gsm ";
-}
-} else {
- $FNAME = "";
-}
+# ---------- Read weather data ----------
+my $localwxtemp = "";
+my $localfeels  = "";
+my $localhumid  = "";
+my $cond_word   = "";
 
 if ($wx eq "YES") {
-    $FNAME = $FNAME . $base . "/silence/1.gsm ";
+    if (-f "$outdir/temperature") {
+        open(my $fh, '<', "$outdir/temperature") or die "Cannot open temperature: $!";
+        { local $/; $localwxtemp = <$fh>; }
+        close($fh);
+        $localwxtemp =~ s/\s+$//;
+    }
 
-if (-e "$outdir/condition.gsm") {
-    $FNAME = $FNAME . $base . "/weather.gsm ";
-    $FNAME = $FNAME . $base . "/conditions.gsm ";
-    $FNAME = $FNAME . "$outdir/condition.gsm ";
+    if ($announce_feels eq "yes" && -f "$outdir/feels-like") {
+        open(my $fh, '<', "$outdir/feels-like") or die "Cannot open feels-like: $!";
+        { local $/; $localfeels = <$fh>; }
+        close($fh);
+        $localfeels =~ s/\s+$//;
+    }
+
+    if ($announce_humidity eq "yes" && -f "$outdir/humidity") {
+        open(my $fh, '<', "$outdir/humidity") or die "Cannot open humidity: $!";
+        { local $/; $localhumid = <$fh>; }
+        close($fh);
+        $localhumid =~ s/\s+$//;
+    }
 }
-if ($localwxtemp ne "" ) {
-    $FNAME = $FNAME . $base . "/wx/temperature.gsm ";
 
-    if ($localwxtemp < -1 ) {
-        $FNAME = $FNAME . $base . "/digits/minus.gsm ";
-        $localwxtemp=int(abs($localwxtemp));
+# ---------- Helpers ----------
+
+# Add number digit files to FNAME string
+sub add_number {
+    my ($n, $fname_ref) = @_;
+    $n = int(abs($n));
+    if ($n >= 100) {
+        $$fname_ref .= "$base/digits/1.gsm ";
+        $$fname_ref .= "$base/digits/hundred.gsm ";
+        $n -= 100 if $n > 100;
+    }
+    if ($n < 20) {
+        $$fname_ref .= "$base/digits/$n.gsm ";
     } else {
-        $localwxtemp=int($localwxtemp);
+        my $tens = substr($n, 0, 1) . "0";
+        $$fname_ref .= "$base/digits/$tens.gsm ";
+        my $ones = substr($n, 1, 1);
+        $$fname_ref .= "$base/digits/$ones.gsm " if $ones > 0;
     }
-
-    if ($localwxtemp >= 100) {
-        $FNAME = $FNAME . $base . "/digits/" . "1" . ".gsm ";
-        $FNAME = $FNAME . $base . "/digits/" . "hundred" . ".gsm ";
-        if ($localwxtemp > 100) {
-           $localwxtemp=($localwxtemp-100);
-        }
-    }
-
-    if ($localwxtemp < 20) {
-        $FNAME = $FNAME . $base . "/digits/" . $localwxtemp . ".gsm ";
-    } elsif ($localwxtemp != 100)
-        {
-        $localwxtemp10 = substr ($localwxtemp,0,1) . "0";
-        $FNAME = $FNAME . $base . "/digits/" . $localwxtemp10 . ".gsm ";
-        $localwxtemp1 = substr ($localwxtemp,1,1);
-        if ($localwxtemp1 > 0) {
-          $FNAME = $FNAME . $base . "/digits/" . $localwxtemp1 . ".gsm ";
-        }
-    }
-    $FNAME = $FNAME . $base . "/degrees.gsm ";
- }
 }
 
-#
-# Following lines concatenate all of the files to one output file
-#
-@proglist = ("cat " . $FNAME . " > " . $outdir . "/current-time.gsm");
-system(@proglist);
-#
-# Following lines process the output file with sox to lower the volume
-# negative numbers lower than -1 reduce the volume - see Sox man page
-# Other processing could be done if necessary
-#
-# REMOVED V1.5 - use telemetry levels
-#
-#@proglist = ("nice -19 sox --temp /tmp " . $outdir . "/temp.gsm " . $outdir . "/current-time.gsm vol -0.35");
-#system(@proglist);
-#
-# Say the time on the local node
-#
-if ($Silent == "0") {
-	@proglist = ("/usr/sbin/asterisk", "-rx", "rpt localplay " . $mynode . " " . $outdir . "/current-time");
-	system(@proglist);
-	sleep 5; # We must sleep so asterisk can read the file before we clean up
-#
-# Note that unlinking the audio file may prevent it from playing when the system is busy.
-#
-#	sleep(2);
-#	unlink "$outdir/current-time.gsm";
-} elsif ($Silent == "1")
-	{ print "\nSaved time and weather sound file to $outdir/current-time.gsm\n\n"
-} elsif ($Silent == "2")
-	{ print "\nSaved weather sound file to $outdir/current-time.gsm\n\n"
+# ---------- Build announcement ----------
+my $FNAME = "";
+my $ampm  = "PM";
+
+my ($sec, $min, $hour, $day, $mon, $year, $wday, $yday, $isdst) = localtime;
+
+# --- Header sound (optional) ---
+my @header_exts = qw(gsm ulaw);
+for my $ext (@header_exts) {
+    if (-f "$confdir/saytime_header.$ext") {
+        system("/usr/sbin/asterisk", "-rx",
+            "rpt localplay $mynode $confdir/saytime_header");
+        last;
+    }
+    if (-f "/etc/asterisk/local/saytime_header.$ext") {
+        system("/usr/sbin/asterisk", "-rx",
+            "rpt localplay $mynode /etc/asterisk/local/saytime_header");
+        last;
+    }
 }
 
-# Cleanup /tmp files
-unlink "$outdir/temperature";
-unlink "$outdir/condition.gsm";
-if ($Silent != "1" && $Silent != "2") {
+# --- Time announcement (skipped in Silent mode 2) ---
+if ($Silent != 2) {
+    if ($time_format eq "24") {
+        # 24-hour format: "The time is HH MM"
+        $FNAME .= "$base/the-time-is.gsm ";
+        add_number($hour, \$FNAME);
+        if ($min == 0) {
+            $FNAME .= "$base/digits/oclock.gsm ";
+        } elsif ($min < 10) {
+            $FNAME .= "$base/digits/oh.gsm ";
+            $FNAME .= "$base/digits/$min.gsm ";
+        } else {
+            my $min10 = substr($min, 0, 1) . "0";
+            $FNAME .= "$base/digits/$min10.gsm ";
+            my $min1 = substr($min, 1, 1);
+            $FNAME .= "$base/digits/$min1.gsm " if $min1 > 0;
+        }
+    } else {
+        # 12-hour format: "Good morning/afternoon/evening, the time is H MM AM/PM"
+        if ($hour < 12) {
+            $ampm  = "AM";
+            $FNAME .= "$base/good-morning.gsm ";
+        } elsif ($hour < 18) {
+            $ampm  = "PM";
+            $FNAME .= "$base/good-afternoon.gsm ";
+        } else {
+            $ampm  = "PM";
+            $FNAME .= "$base/good-evening.gsm ";
+        }
+
+        my $hour12 = $hour;
+        $hour12 -= 12 if $hour12 > 12;
+        $hour12  = 12  if $hour12 == 0;
+
+        $FNAME .= "$base/the-time-is.gsm ";
+        $FNAME .= "$base/digits/$hour12.gsm ";
+
+        if ($min != 0) {
+            if ($min < 10) {
+                $FNAME .= "$base/digits/oh.gsm ";
+                $FNAME .= "$base/digits/$min.gsm ";
+            } elsif ($min < 20) {
+                $FNAME .= "$base/digits/$min.gsm ";
+            } else {
+                my $min10 = substr($min, 0, 1) . "0";
+                $FNAME .= "$base/digits/$min10.gsm ";
+                my $min1 = substr($min, 1, 1);
+                $FNAME .= "$base/digits/$min1.gsm " if $min1 > 0;
+            }
+        }
+
+        if ($ampm eq "AM") {
+            $FNAME .= "$base/digits/a-m.gsm ";
+        } else {
+            $FNAME .= "$base/digits/p-m.gsm ";
+        }
+    }
+}
+
+# --- Weather announcement ---
+if ($wx eq "YES") {
+    $FNAME .= "$base/silence/1.gsm ";
+
+    # Condition: may be one word ("clear") or two words ("partly cloudy")
+    if (-e "$outdir/condition.gsm") {
+        $FNAME .= "$base/weather.gsm ";
+        $FNAME .= "$base/conditions.gsm ";
+
+        # weather.sh concatenates all condition word audio into condition.gsm
+        # (handles both single-word "clear" and multi-word "partly cloudy")
+        $FNAME .= "$outdir/condition.gsm ";
+    }
+
+    # Temperature
+    if ($localwxtemp ne "") {
+        $FNAME .= "$base/wx/temperature.gsm ";
+
+        my $temp = int($localwxtemp);
+        if ($temp < -1) {
+            $FNAME .= "$base/digits/minus.gsm ";
+            $temp = int(abs($temp));
+        }
+        add_number($temp, \$FNAME);
+        $FNAME .= "$base/degrees.gsm ";
+    }
+
+    # Feels-like temperature
+    if ($localfeels ne "") {
+        $FNAME .= "$base/silence/1.gsm ";
+        # "feels like" — use wx/heat-index.gsm as "feels like" approximation,
+        # or look for a feels-like.gsm if it exists
+        my $feels_file = "";
+        for my $dir ($base, "$base/wx") {
+            if (-f "$dir/feels-like.gsm") { $feels_file = "$dir/feels-like.gsm"; last; }
+        }
+        $feels_file = "$base/wx/heat-index.gsm" unless $feels_file;
+        $FNAME .= "$feels_file " if -f $feels_file;
+
+        my $feels = int($localfeels);
+        if ($feels < -1) {
+            $FNAME .= "$base/digits/minus.gsm ";
+            $feels = int(abs($feels));
+        }
+        add_number($feels, \$FNAME);
+        $FNAME .= "$base/degrees.gsm ";
+    }
+
+    # Humidity
+    if ($localhumid ne "") {
+        $FNAME .= "$base/silence/1.gsm ";
+        $FNAME .= "$base/wx/humidity.gsm " if -f "$base/wx/humidity.gsm";
+        add_number(int($localhumid), \$FNAME);
+        $FNAME .= "$base/wx/percent.gsm " if -f "$base/wx/percent.gsm";
+    }
+}
+
+# ---------- Concatenate and play ----------
+system("cat $FNAME > $outdir/current-time.gsm");
+
+if ($Silent == 0) {
+    system("/usr/sbin/asterisk", "-rx",
+        "rpt localplay $mynode $outdir/current-time");
+    sleep 5;
     unlink "$outdir/current-time.gsm";
+} elsif ($Silent == 1) {
+    print "\nSaved time and weather to $outdir/current-time.gsm\n\n";
+} elsif ($Silent == 2) {
+    print "\nSaved weather to $outdir/current-time.gsm\n\n";
 }
+
+# NOTE: /tmp/temperature, /tmp/condition.gsm, /tmp/feels-like, /tmp/humidity
+# are maintained by the systemd weather timer and are intentionally NOT deleted here.
 
 # end of saytime.pl
-

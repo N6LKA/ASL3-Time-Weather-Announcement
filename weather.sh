@@ -1,39 +1,52 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------------------------
-# Enhanced Weather Script for Global Operations - v2.7.4
+# Weather Script for ASL3 Time and Weather Announcement
+# https://github.com/N6LKA/ASL3-Time-Weather-Announcement
 #
 # Copyright 2025, Jory A. Pratt, W5GLE
 # Based on original work by D. Crompton, WA3DSP
 # Modified by:              Joe (KD2NFC)
-# Enhanced by:              W5GLE team for global operations
-# Date:                     2025-10-11
-# Version:                  2.7.4
+# Modified by:              Larry K. Aycock, N6LKA
+# Version:                  3.0.0
 #
 # Description:
-#   Global weather script with full feature parity to weather.pl:
-#   - ICAO airport codes (6000+ airports worldwide)
-#   - Postal codes worldwide (US, Canada, Europe, etc.)
-#   - 50+ special remote locations (DXpeditions, research stations)
-#   - Command line option overrides
-#   - Providers: NOAA METAR + Open-Meteo + Nominatim geocoding
-#   - Canadian FSA mapping for accurate Ontario locations
-#   - Day/night detection for intelligent conditions
+#   Fetches current weather and writes cached output files for saytime.pl.
+#   Supports NOAA METAR, Open-Meteo, and WeatherFlow Tempest.
 #
-#   Config: /etc/asterisk/local/weather.ini
-#       process_condition="YES"
-#       Temperature_mode="F"            # "F" or "C"
-#       default_country="us"            # us, ca, fr, de, uk, etc.
-#       DEFAULT_PROVIDER="auto"         # auto, metar, or openmeteo
+#   Caches coordinates to avoid repeated Nominatim lookups.
+#   If /tmp/temperature is fresher than CACHE_MAX_AGE_MIN, exits immediately
+#   so the systemd timer is the primary fetcher and saytime.pl internal calls
+#   are no-ops when data is already fresh.
 #
-#   Outputs:
-#       /tmp/temperature
-#       /tmp/condition.gsm (or .ulaw)
+#   Config: /etc/asterisk/scripts/saytime-weather/weather.ini
+#     DEFAULT_PROVIDER="auto"     # auto, metar, openmeteo, tempest
+#     Temperature_mode="F"        # F or C
+#     process_condition="YES"     # YES or NO
+#     ANNOUNCE_FEELS_LIKE="no"    # yes or no
+#     ANNOUNCE_HUMIDITY="no"      # yes or no
+#     TempestToken=""             # WeatherFlow API token
+#     TempestStationID=""         # WeatherFlow station ID
+#     CACHE_MAX_AGE_MIN="12"      # skip fetch if cache is this fresh (minutes)
+#
+#   Output files (in /tmp):
+#     temperature       - integer temp in configured unit
+#     feels-like        - integer feels-like temp (if ANNOUNCE_FEELS_LIKE=yes)
+#     humidity          - integer humidity percentage (if ANNOUNCE_HUMIDITY=yes)
+#     condition.gsm     - GSM audio file for weather condition word
 # ------------------------------------------------------------------------------
 
-set -euo pipefail
+set -uo pipefail
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-VERSION="2.7.4"
+VERSION="3.0.0"
+DESTDIR="/tmp"
+LOG="/tmp/weather-debug.log"
+
+# ---------- Logging ----------
+# Ensure log is world-writable so both asterisk (systemd) and root can append.
+# Fall back to /dev/null if we can't create or chmod it.
+touch "$LOG" 2>/dev/null && chmod 666 "$LOG" 2>/dev/null || LOG="/dev/null"
+log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
 
 # ---------- Command Line Options ----------
 opt_config_file=""
@@ -42,90 +55,47 @@ opt_temperature_mode=""
 opt_no_cache=0
 opt_no_condition=0
 opt_verbose=0
+opt_force=0
 location_arg=""
 display_mode=""
 
 show_help(){
-  cat <<'EOF'
-weather.sh version 2.7.4
+  cat <<EOF
+weather.sh version $VERSION
 
 Usage: weather.sh [OPTIONS] location_id [v]
 
 Arguments:
-  location_id    Postal code, ZIP code, ICAO airport code, or special location
-                 ICAO examples: KJFK, EGLL, CYYZ, NZSP, LFPG, RJAA
-                 Special: SOUTHPOLE, ALERT, HEARD, BOUVET, MIDWAY, EASTER, etc.
-  v              Optional: Display text only (verbose mode), no sound output
+  location_id    ZIP/postal code, ICAO airport code, or special location
+                 (ignored when DEFAULT_PROVIDER=tempest and Tempest is configured)
+  v              Display text only (verbose/test mode), no file output
 
 Options:
   -c, --config FILE        Use alternate configuration file
   -d, --default-country CC Override default country (us, ca, fr, de, uk, etc.)
   -t, --temperature-mode M Override temperature mode (F or C)
-  --no-cache               Disable caching for this request
+  --no-cache               Force fresh fetch even if cache is recent
   --no-condition           Skip weather condition announcements
   -h, --help               Show this help message
   --version                Show version information
 
 Examples:
-  Postal Codes:
-    weather.sh 90210                    # Beverly Hills, CA (ZIP)
-    weather.sh M5H2N2 v                 # Toronto, ON (postal code)
-    weather.sh -d fr 75001              # Paris, France
-    weather.sh -d de 10115 v            # Berlin, Germany
-
-  ICAO Airport Codes:
-    weather.sh KJFK v                   # JFK Airport, New York
-    weather.sh EGLL                     # Heathrow, London
-    weather.sh CYYZ v                   # Toronto Pearson
-    weather.sh LFPG                     # Charles de Gaulle, Paris
-    weather.sh RJAA v                   # Narita, Tokyo
-
-  Special Remote Locations:
-    weather.sh SOUTHPOLE v              # South Pole Station
-    weather.sh ALERT v                  # Alert, Nunavut (northernmost)
-    weather.sh HEARD v                  # Heard Island (VK0)
-    weather.sh BOUVET v                 # Bouvet Island (3Y0)
-    weather.sh EASTER v                 # Easter Island (CE0Y)
-    weather.sh MIDWAY v                 # Midway Atoll (KH4)
-
-  With Options:
-    weather.sh -t C KJFK                # JFK in Celsius
-    weather.sh -d ca M5H2N2             # Force Canadian lookup
-    weather.sh --no-cache EGLL v        # Fresh METAR from Heathrow
+  weather.sh 90210 v          # Test with US ZIP code
+  weather.sh KJFK v           # Test with ICAO airport code
+  weather.sh --no-cache 90210 # Force fresh fetch
 EOF
   exit 0
 }
 
-# Parse command line options
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -h|--help)
-      show_help
-      ;;
-    --version)
-      echo "weather.sh version $VERSION"
-      exit 0
-      ;;
-    -c|--config)
-      opt_config_file="$2"
-      shift 2
-      ;;
-    -d|--default-country)
-      opt_default_country="$2"
-      shift 2
-      ;;
-    -t|--temperature-mode)
-      opt_temperature_mode="${2^^}"  # Convert to uppercase
-      shift 2
-      ;;
-    --no-cache)
-      opt_no_cache=1
-      shift
-      ;;
-    --no-condition)
-      opt_no_condition=1
-      shift
-      ;;
+    -h|--help) show_help ;;
+    --version) echo "weather.sh version $VERSION"; exit 0 ;;
+    -c|--config) opt_config_file="$2"; shift 2 ;;
+    -d|--default-country) opt_default_country="$2"; shift 2 ;;
+    -t|--temperature-mode) opt_temperature_mode="${2^^}"; shift 2 ;;
+    --no-cache) opt_no_cache=1; shift ;;
+    --no-condition) opt_no_condition=1; shift ;;
     -*)
       echo "Unknown option: $1" >&2
       echo "Use --help for usage information" >&2
@@ -147,168 +117,99 @@ process_condition="YES"
 Temperature_mode="F"
 default_country="us"
 DEFAULT_PROVIDER="auto"
+ANNOUNCE_FEELS_LIKE="no"
+ANNOUNCE_HUMIDITY="no"
+TempestToken=""
+TempestStationID=""
+CACHE_MAX_AGE_MIN="12"
+COORD_CACHE=""
 
 CONFIG_PATHS=(
+  "/etc/asterisk/scripts/saytime-weather/weather.ini"
   "/etc/asterisk/local/weather.ini"
   "/etc/asterisk/weather.ini"
   "/usr/local/etc/weather.ini"
   "$HOME/.weather.ini"
 )
 
-config_loaded=0
-
-# Use custom config if specified
 if [ -n "$opt_config_file" ]; then
   if [ -f "$opt_config_file" ]; then
     # shellcheck source=/dev/null
     . "$opt_config_file" 2>/dev/null || true
-    config_loaded=1
   else
-    echo "ERROR: Custom config file not found: $opt_config_file" >&2
+    echo "ERROR: Config file not found: $opt_config_file" >&2
     exit 1
   fi
 else
-  # Try each config path
   for config_file in "${CONFIG_PATHS[@]}"; do
     if [ -f "$config_file" ]; then
       # shellcheck source=/dev/null
       . "$config_file" 2>/dev/null || true
-      config_loaded=1
       break
     fi
   done
-
-  # If no config found, try to create one
-  if [ $config_loaded -eq 0 ]; then
-    for config_file in "${CONFIG_PATHS[@]}"; do
-      # Try to create config file
-      config_dir="$(dirname "$config_file")"
-
-      # Create directory if needed and we have permissions
-      if [ ! -d "$config_dir" ]; then
-        mkdir -p "$config_dir" 2>/dev/null || continue
-      fi
-
-      # Try to create config file
-      if cat > "$config_file" 2>/dev/null <<'EOF'
-# ============================================================================
-# Weather Configuration for saytime-weather
-# ============================================================================
-# This file controls how weather data is fetched and announced.
-# All settings have sensible defaults - no changes required to get started!
-# ============================================================================
-
-# Temperature display mode: F for Fahrenheit, C for Celsius
-# Default: F
-Temperature_mode="F"
-
-# Process and announce weather conditions (cloudy, rain, clear, etc.)
-# Set to NO to only announce temperature
-# Default: YES
-process_condition="YES"
-
-# Default country for ambiguous postal code lookups
-# Use ISO 3166-1 alpha-2 country codes: us, ca, de, fr, uk, etc.
-# Default: us
-default_country="us"
-
-# Weather data provider: auto, metar, or openmeteo
-# Default: auto (tries best source automatically)
-DEFAULT_PROVIDER="auto"
-
-# ============================================================================
-# USAGE EXAMPLES
-# ============================================================================
-#
-# Test weather for your location:
-#   weather.sh KJFK v          # JFK Airport
-#   weather.sh 90210 v         # Beverly Hills, CA
-#   weather.sh M5H2N2 v        # Toronto, ON
-#   weather.sh ALERT v         # Alert, Nunavut
-#
-# With options:
-#   weather.sh -d fr 75001     # Paris with French lookup
-#   weather.sh -t C KJFK       # JFK in Celsius
-#
-# ============================================================================
-EOF
-      then
-        chmod 644 "$config_file" 2>/dev/null || true
-        # Now source the newly created config
-        # shellcheck source=/dev/null
-        . "$config_file" 2>/dev/null || true
-        config_loaded=1
-        break
-      fi
-    done
-  fi
 fi
 
-# Apply command line overrides (take precedence over config)
+# Apply command line overrides
 [ -n "$opt_default_country" ] && default_country="$opt_default_country"
 [ -n "$opt_temperature_mode" ] && Temperature_mode="$opt_temperature_mode"
 [ "$opt_no_condition" -eq 1 ] && process_condition="NO"
-# Note: cache is not applicable to shell script, but we accept the flag for compatibility
 
 case "${DEFAULT_PROVIDER:-}" in
-  auto|openmeteo|metar) : ;;
+  auto|openmeteo|metar|tempest) : ;;
   *) DEFAULT_PROVIDER="auto" ;;
 esac
 provider="${DEFAULT_PROVIDER}"
 
-destdir="/tmp"
+# COORD_CACHE defaults to inside the config directory if not set
+if [ -z "$COORD_CACHE" ]; then
+  COORD_CACHE="/etc/asterisk/scripts/saytime-weather/weather-coords.cache"
+fi
+
+# ---------- Cache Freshness Check ----------
+# If the temperature file is fresh enough, skip the fetch entirely.
+# The systemd timer is the primary updater; saytime.pl internal calls are no-ops.
+if [ "$opt_no_cache" -eq 0 ] && [ "$display_mode" != "v" ]; then
+  if [ -f "$DESTDIR/temperature" ]; then
+    age_min=$(( ( $(date +%s) - $(date -r "$DESTDIR/temperature" +%s) ) / 60 ))
+    if [ "$age_min" -lt "${CACHE_MAX_AGE_MIN:-12}" ]; then
+      log "Cache is ${age_min}m old (< ${CACHE_MAX_AGE_MIN}m), skipping fetch"
+      exit 0
+    fi
+  fi
+fi
 
 # ---------- Helpers ----------
 toupper(){ tr '[:lower:]' '[:upper:]'; }
 round(){ awk -v x="$1" 'BEGIN{printf "%.0f", x+0}'; }
 
-# Check if input is ICAO code (4 letters)
 is_icao_code(){
   local code="$1"
   [[ "$code" =~ ^[A-Z]{4}$ ]] && return 0
   return 1
 }
 
-# Check if input is special location
 is_special_location(){
-  local loc="$(echo "$1" | toupper | tr -d ' ')"
-
+  local loc
+  loc="$(echo "$1" | toupper | tr -d ' ')"
   case "$loc" in
-    # Antarctica
-    SOUTHPOLE|MCMURDO|PALMER|VOSTOK|CASEY|MAWSON|DAVIS|SCOTTBASE|SYOWA|CONCORDIA|HALLEY|DUMONT|SANAE)
-      return 0 ;;
-    # Arctic
-    ALERT|EUREKA|THULE|LONGYEARBYEN|BARROW|RESOLUTE|GRISE)
-      return 0 ;;
-    # Remote Islands / DXpedition Sites
-    ASCENSION|STHELENA|TRISTAN|BOUVET|HEARD|KERGUELEN|CROZET|AMSTERDAM|MACQUARIE)
-      return 0 ;;
-    # Pacific Islands
-    MIDWAY|WAKE|JOHNSTON|PALMYRA|JARVIS|HOWLAND|BAKER|KINGMAN)
-      return 0 ;;
-    # Indian Ocean
-    DIEGO|CHAGOS|COCOS|CHRISTMAS)
-      return 0 ;;
-    # South Atlantic
-    FALKLANDS|SOUTHGEORGIA|SOUTHSANDWICH)
-      return 0 ;;
-    # Pacific Polynesia
-    MARQUESAS|EASTER|PITCAIRN|CLIPPERTON|GALAPAGOS)
-      return 0 ;;
-    # Observatories & Other
+    SOUTHPOLE|MCMURDO|PALMER|VOSTOK|CASEY|MAWSON|DAVIS|SCOTTBASE|SYOWA|CONCORDIA|HALLEY|DUMONT|SANAE|\
+    ALERT|EUREKA|THULE|LONGYEARBYEN|BARROW|RESOLUTE|GRISE|\
+    ASCENSION|STHELENA|TRISTAN|BOUVET|HEARD|KERGUELEN|CROZET|AMSTERDAM|MACQUARIE|\
+    MIDWAY|WAKE|JOHNSTON|PALMYRA|JARVIS|HOWLAND|BAKER|KINGMAN|\
+    DIEGO|CHAGOS|COCOS|CHRISTMAS|\
+    FALKLANDS|SOUTHGEORGIA|SOUTHSANDWICH|\
+    MARQUESAS|EASTER|PITCAIRN|CLIPPERTON|GALAPAGOS|\
     MAUNA|JUNGFRAUJOCH|MCMURDODRY|ATACAMA|GOUGH|MARION|PRINCE|CAMPBELL|AUCKLAND|KERMADEC|CHATHAM)
       return 0 ;;
-    *)
-      return 1 ;;
+    *) return 1 ;;
   esac
 }
 
-# Get coordinates for special locations
 get_special_coordinates(){
-  local loc="$(echo "$1" | toupper | tr -d ' ')"
-
+  local loc
+  loc="$(echo "$1" | toupper | tr -d ' ')"
   case "$loc" in
-    # ===== ANTARCTICA =====
     SOUTHPOLE)    echo "-90.0|0.0" ;;
     MCMURDO)      echo "-77.85|166.67" ;;
     PALMER)       echo "-64.77|-64.05" ;;
@@ -322,8 +223,6 @@ get_special_coordinates(){
     HALLEY)       echo "-75.58|-26.66" ;;
     DUMONT)       echo "-66.66|140.01" ;;
     SANAE)        echo "-71.67|-2.84" ;;
-
-    # ===== ARCTIC =====
     ALERT)        echo "82.50|-62.35" ;;
     EUREKA)       echo "79.99|-85.93" ;;
     THULE)        echo "76.53|-68.70" ;;
@@ -331,8 +230,6 @@ get_special_coordinates(){
     BARROW)       echo "71.29|-156.79" ;;
     RESOLUTE)     echo "74.72|-94.83" ;;
     GRISE)        echo "76.42|-82.90" ;;
-
-    # ===== REMOTE ISLANDS (DXpedition Sites) =====
     ASCENSION)    echo "-7.95|-14.36" ;;
     STHELENA)     echo "-15.97|-5.72" ;;
     TRISTAN)      echo "-37.11|-12.28" ;;
@@ -342,8 +239,6 @@ get_special_coordinates(){
     CROZET)       echo "-46.43|51.86" ;;
     AMSTERDAM)    echo "-37.83|77.57" ;;
     MACQUARIE)    echo "-54.62|158.86" ;;
-
-    # ===== PACIFIC ISLANDS =====
     MIDWAY)       echo "28.21|-177.38" ;;
     WAKE)         echo "19.28|166.65" ;;
     JOHNSTON)     echo "16.73|-169.53" ;;
@@ -352,175 +247,211 @@ get_special_coordinates(){
     HOWLAND)      echo "0.81|-176.62" ;;
     BAKER)        echo "0.19|-176.48" ;;
     KINGMAN)      echo "6.38|-162.42" ;;
-
-    # ===== INDIAN OCEAN =====
-    DIEGO)        echo "-7.26|72.40" ;;
-    CHAGOS)       echo "-7.26|72.40" ;;
+    DIEGO|CHAGOS) echo "-7.26|72.40" ;;
     COCOS)        echo "-12.19|96.83" ;;
     CHRISTMAS)    echo "-10.49|105.62" ;;
-
-    # ===== SOUTH ATLANTIC =====
     FALKLANDS)    echo "-51.70|-59.52" ;;
     SOUTHGEORGIA) echo "-54.28|-36.51" ;;
     SOUTHSANDWICH) echo "-59.43|-26.35" ;;
-
-    # ===== PACIFIC POLYNESIA =====
     MARQUESAS)    echo "-9.00|-140.00" ;;
     EASTER)       echo "-27.11|-109.36" ;;
     PITCAIRN)     echo "-25.07|-130.10" ;;
     CLIPPERTON)   echo "10.30|-109.22" ;;
     GALAPAGOS)    echo "-0.95|-90.97" ;;
-
-    # ===== MOUNTAIN OBSERVATORIES =====
     MAUNA)        echo "19.54|-155.58" ;;
     JUNGFRAUJOCH) echo "46.55|7.98" ;;
-
-    # ===== EXTREME DESERTS =====
     MCMURDODRY)   echo "-77.85|163.00" ;;
     ATACAMA)      echo "-24.50|-69.25" ;;
-
-    # ===== OTHER NOTABLE REMOTE LOCATIONS =====
     GOUGH)        echo "-40.35|-9.88" ;;
-    MARION)       echo "-46.88|37.86" ;;
-    PRINCE)       echo "-46.77|37.86" ;;
+    MARION|PRINCE) echo "-46.88|37.86" ;;
     CAMPBELL)     echo "-52.55|169.15" ;;
     AUCKLAND)     echo "-50.73|166.09" ;;
     KERMADEC)     echo "-29.25|-177.92" ;;
     CHATHAM)      echo "-43.95|-176.55" ;;
-
     *) return 1 ;;
   esac
 }
 
-# Map METAR codes to condition words
+# ---------- Condition Word Mapping ----------
 metar_condition_word(){
-  local m="$(printf '%s' "$1" | tr -s ' ')"
-  [[ "$m" =~ (\+|-)?TS ]] && { echo "thunderstorm"; return; }
+  local m
+  m="$(printf '%s' "$1" | tr -s ' ')"
+  [[ "$m" =~ (\+|-)?TS ]]          && { echo "thunderstorm"; return; }
   [[ "$m" =~ FZRA|FZDZ|\+RA|-RA|RA ]] && { echo "rain"; return; }
-  [[ "$m" =~ SN ]] && { echo "snow"; return; }
-  [[ "$m" =~ PL ]] && { echo "hail"; return; }
-  [[ "$m" =~ FG ]] && { echo "fog"; return; }
-  [[ "$m" =~ BR|HZ|FU|DU|SA ]] && { echo "mist"; return; }
-  [[ "$m" =~ OVC|BKN|SCT ]] && { echo "cloudy"; return; }
-  [[ "$m" =~ FEW ]] && { echo "clear"; return; }
-  [[ "$m" =~ (CLR|SKC) ]] && { echo "clear"; return; }
+  [[ "$m" =~ SN ]]                  && { echo "snow"; return; }
+  [[ "$m" =~ PL ]]                  && { echo "hail"; return; }
+  [[ "$m" =~ FG ]]                  && { echo "fog"; return; }
+  [[ "$m" =~ BR|HZ|FU|DU|SA ]]     && { echo "mist"; return; }
+  [[ "$m" =~ OVC|BKN|SCT ]]        && { echo "cloudy"; return; }
   echo "clear"
 }
 
-# Parse temperature from METAR (returns Fahrenheit)
-parse_metar_temp_f(){
-  local m="$1" pair chunk sign num t_c_raw
-  pair="$(printf '%s' "$m" | grep -oE ' [M]?[0-9]{2}/[M]?[0-9]{2} ' | head -n1 || true)"
-  if [ -n "$pair" ]; then
-    pair="$(printf '%s' "$pair" | tr -d ' ')"; chunk="${pair%%/*}"
-    if [ "${chunk#M}" != "$chunk" ]; then sign='-'; num="${chunk#M}"; else sign=''; num="$chunk"; fi
-    num="${num##0}"; [ -z "$num" ] && num=0; t_c_raw="${sign}${num}"
-    awk -v c="$t_c_raw" 'BEGIN{printf "%.0f", (c*9/5)+32}'; return 0
+openmeteo_condition_word(){
+  local code="$1" is_day="${2:-1}"
+  case "$code" in
+    0)                  echo "clear" ;;
+    1|2) [ "$is_day" = "1" ] && echo "sunny" || echo "clear" ;;
+    3)                  echo "cloudy" ;;
+    45|48)              echo "fog" ;;
+    51|53|55|56|57)     echo "rain" ;;
+    61|63|65|66|67|80|81|82) echo "rain" ;;
+    71|73|75|77|85|86)  echo "snow" ;;
+    95|96|99)           echo "thunderstorm" ;;
+    *)                  echo "clear" ;;
+  esac
+}
+
+# Map WeatherFlow condition text to a single word (or two words like "partly cloudy")
+tempest_condition_word(){
+  local cond
+  cond="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$cond" in
+    *thunderstorm*|*thunder*)  echo "thunderstorm" ;;
+    *heavy*rain*|*rain*heavy*) echo "rain" ;;
+    *drizzle*)                 echo "rain" ;;
+    *rain*)                    echo "rain" ;;
+    *snow*|*sleet*|*blizzard*) echo "snow" ;;
+    *hail*)                    echo "hail" ;;
+    *fog*|*mist*)              echo "fog" ;;
+    *partly*cloud*)            echo "partly cloudy" ;;
+    *mostly*cloud*)            echo "cloudy" ;;
+    *overcast*|*cloud*)        echo "cloudy" ;;
+    *sunny*|*clear*)           echo "clear" ;;
+    *fair*)                    echo "clear" ;;
+    *)                         echo "clear" ;;
+  esac
+}
+
+# ---------- Write Condition Sound File ----------
+write_condition_gsm(){
+  local phrase="$1"
+  local sound_dirs=(
+    /usr/local/share/asterisk/sounds/custom
+    /usr/share/asterisk/sounds/en/wx
+    /var/lib/asterisk/sounds
+    /usr/share/asterisk/sounds/en
+  )
+
+  find_sound_file(){
+    local w="$1"
+    for dir in "${sound_dirs[@]}"; do
+      [ -f "${dir}/${w}.gsm"  ] && { echo "${dir}/${w}.gsm";  return 0; }
+      [ -f "${dir}/${w}.ulaw" ] && { echo "${dir}/${w}.ulaw"; return 0; }
+    done
+    return 1
+  }
+
+  # Handle multi-word conditions (e.g. "partly cloudy") by concatenating each word's file
+  local files=()
+  for word in $phrase; do
+    local f
+    f="$(find_sound_file "$word" || true)"
+    if [ -n "$f" ]; then
+      files+=("$f")
+    else
+      log "No sound file found for condition word: $word"
+    fi
+  done
+
+  if [ "${#files[@]}" -gt 0 ]; then
+    cat "${files[@]}" > "$DESTDIR/condition.gsm.new" && mv "$DESTDIR/condition.gsm.new" "$DESTDIR/condition.gsm"
+  else
+    log "No sound file found for any word in condition: $phrase"
+    rm -f "$DESTDIR/condition.gsm"
+  fi
+}
+
+# ---------- Coordinate Cache ----------
+get_cached_coords(){
+  local location="$1"
+  if [ -f "$COORD_CACHE" ] && [ "$opt_no_cache" -eq 0 ]; then
+    local cached_loc cached_coords
+    cached_loc="$(awk -F'|' 'NR==1{print $1}' "$COORD_CACHE" 2>/dev/null || true)"
+    cached_coords="$(awk -F'|' 'NR==1{print $2"|"$3}' "$COORD_CACHE" 2>/dev/null || true)"
+    if [ "$cached_loc" = "$location" ] && [ -n "$cached_coords" ]; then
+      echo "$cached_coords"
+      return 0
+    fi
   fi
   return 1
 }
 
-# Map Open-Meteo WMO weather_code to condition word with day/night detection
-openmeteo_condition_word(){
-  local code="$1" is_day="${2:-1}"
-  case "$code" in
-    0) echo "clear" ;;
-    1|2) [ "$is_day" = "1" ] && echo "sunny" || echo "clear" ;;  # Day/night aware
-    3) echo "cloudy" ;;
-    45|48) echo "fog" ;;
-    51|53|55|56|57) echo "rain" ;;
-    61|63|65|66|67|80|81|82) echo "rain" ;;
-    71|73|75|77|85|86) echo "snow" ;;
-    95|96|99) echo "thunderstorm" ;;
-    *) echo "clear" ;;
-  esac
-}
-
-# Write condition sound file
-write_condition_gsm(){
-  local word="$(echo "$1" | awk '{print tolower($1)}')"
-  local file1=""
-
-  # Try common sound directories
-  for dir in /usr/local/share/asterisk/sounds/custom /usr/share/asterisk/sounds/en/wx /var/lib/asterisk/sounds /usr/share/asterisk/sounds/en; do
-    if [ -f "${dir}/${word}.gsm" ]; then
-      file1="${dir}/${word}.gsm"
-      break
-    fi
-    if [ -f "${dir}/${word}.ulaw" ]; then
-      file1="${dir}/${word}.ulaw"
-      break
-    fi
-  done
-
-  if [ -n "$file1" ]; then
-    cat "$file1" > "$destdir/condition.gsm"
-  else
-    rm -f "$destdir/condition.gsm"
+save_coords(){
+  local location="$1" lat="$2" lon="$3"
+  local cache_dir
+  cache_dir="$(dirname "$COORD_CACHE")"
+  if [ -d "$cache_dir" ] || mkdir -p "$cache_dir" 2>/dev/null; then
+    echo "${location}|${lat}|${lon}" > "$COORD_CACHE" 2>/dev/null || true
   fi
 }
 
-# ---------- Canadian FSA to City Mapping ----------
+# ---------- Canadian FSA Mapping ----------
 get_canadian_city(){
   local fsa="$1"
-
-  # 3-character FSA mappings (Ontario focus)
   case "$fsa" in
-    N7L) echo "Chatham-Kent, Ontario" ;;
-    N7M|N7T) echo "Sarnia, Ontario" ;;
+    N7L)                  echo "Chatham-Kent, Ontario" ;;
+    N7M|N7T)              echo "Sarnia, Ontario" ;;
     N6A|N6B|N6C|N6E|N6G|N6H|N6J|N6K) echo "London, Ontario" ;;
-    N8A|N8H|N8N|N8P|N8R|N8S|N8T|N8V|N8W|N8X|N8Y) echo "Windsor, Ontario" ;;
+    N8A|N8H|N8N|N8P|N8R|N8S|N8T|N8V|N8W|N8X|N8Y|\
     N9A|N9B|N9C|N9E|N9G|N9H|N9J|N9K|N9Y) echo "Windsor, Ontario" ;;
-    N1G|N1H|N1K|N1L) echo "Guelph, Ontario" ;;
-    N3C|N3E|N3H) echo "Cambridge, Ontario" ;;
+    N1G|N1H|N1K|N1L)      echo "Guelph, Ontario" ;;
+    N3C|N3E|N3H)          echo "Cambridge, Ontario" ;;
     N2C|N2E|N2G|N2H|N2J|N2K|N2L|N2M|N2N|N2P|N2R) echo "Kitchener, Ontario" ;;
-
-    # Single-letter fallbacks for major cities
-    M*) echo "Toronto, Ontario" ;;
-    V*) echo "Vancouver, British Columbia" ;;
-    H*) echo "Montreal, Quebec" ;;
-    T*) echo "Calgary, Alberta" ;;
-    R*) echo "Winnipeg, Manitoba" ;;
-    K*) echo "Ottawa, Ontario" ;;
-    L*) echo "Mississauga, Ontario" ;;
-    N*) echo "London, Ontario" ;;
-    P*) echo "Thunder Bay, Ontario" ;;
-    S*) echo "Regina, Saskatchewan" ;;
-    E*) echo "Moncton, New Brunswick" ;;
-    B*) echo "Halifax, Nova Scotia" ;;
-
-    *) return 1 ;;
+    M*)                   echo "Toronto, Ontario" ;;
+    V*)                   echo "Vancouver, British Columbia" ;;
+    H*)                   echo "Montreal, Quebec" ;;
+    T*)                   echo "Calgary, Alberta" ;;
+    R*)                   echo "Winnipeg, Manitoba" ;;
+    K*)                   echo "Ottawa, Ontario" ;;
+    L*)                   echo "Mississauga, Ontario" ;;
+    N*)                   echo "London, Ontario" ;;
+    P*)                   echo "Thunder Bay, Ontario" ;;
+    S*)                   echo "Regina, Saskatchewan" ;;
+    E*)                   echo "Moncton, New Brunswick" ;;
+    B*)                   echo "Halifax, Nova Scotia" ;;
+    *)                    return 1 ;;
   esac
 }
 
-# ---------- Postal Code to Coordinates (Nominatim) ----------
+# ---------- Postal Code to Coordinates (Nominatim with cache) ----------
 postal_to_coordinates(){
   local postal="$1"
   local country="${default_country:-us}"
+  local postal_upper
+  postal_upper="$(echo "$postal" | toupper)"
+
+  # Check coordinate cache first
+  local cached
+  cached="$(get_cached_coords "$postal_upper" || true)"
+  if [ -n "$cached" ]; then
+    log "Using cached coords for $postal_upper: $cached"
+    echo "$cached"
+    return 0
+  fi
 
   local url=""
-  local postal_upper="$(echo "$postal" | toupper)"
-
   if [[ "$postal_upper" =~ ^[0-9]{5}$ ]]; then
-    # 5-digit: US/Germany/France - use default_country
     url="https://nominatim.openstreetmap.org/search?postalcode=${postal}&country=${country}&format=json&limit=1"
-  elif [[ "$postal_upper" =~ ^[A-Z][0-9][A-Z][0-9][A-Z][0-9]$ ]] || [[ "$postal_upper" =~ ^[A-Z][0-9][A-Z].?[0-9][A-Z][0-9]$ ]]; then
-    # Canadian postal code (with or without space)
-    local normalized="$(echo "$postal_upper" | tr -d ' ' | sed 's/^\([A-Z][0-9][A-Z]\)\([0-9][A-Z][0-9]\)$/\1 \2/')"
+  elif [[ "$postal_upper" =~ ^[A-Z][0-9][A-Z][0-9][A-Z][0-9]$ ]] || \
+       [[ "$postal_upper" =~ ^[A-Z][0-9][A-Z].?[0-9][A-Z][0-9]$ ]]; then
+    local normalized
+    normalized="$(echo "$postal_upper" | tr -d ' ' | sed 's/^\([A-Z][0-9][A-Z]\)\([0-9][A-Z][0-9]\)$/\1 \2/')"
     url="https://nominatim.openstreetmap.org/search?postalcode=${normalized}&country=ca&format=json&limit=1"
   else
-    # Try generic postal code search
     url="https://nominatim.openstreetmap.org/search?postalcode=${postal}&format=json&limit=1"
   fi
 
+  log "Calling Nominatim for $postal_upper"
   local response lat lon
-  response="$(curl -fsS "$url" 2>/dev/null || true)"
+  response="$(curl -fsS --connect-timeout 10 -A "ASL3-Time-Weather/3.0 (github.com/N6LKA/ASL3-Time-Weather-Announcement)" \
+    "$url" 2>/dev/null || true)"
 
   if [ -n "$response" ] && [ "$response" != "[]" ]; then
-    lat="$(echo "$response" | sed -n 's/.*"lat":"\([^"]*\)".*/\1/p' | head -n1)"
-    lon="$(echo "$response" | sed -n 's/.*"lon":"\([^"]*\)".*/\1/p' | head -n1)"
+    lat="$(echo "$response" | grep -oP '"lat":"\K[^"]+' | head -n1 || true)"
+    lon="$(echo "$response" | grep -oP '"lon":"\K[^"]+' | head -n1 || true)"
 
     if [ -n "$lat" ] && [ -n "$lon" ]; then
+      save_coords "$postal_upper" "$lat" "$lon"
       echo "$lat|$lon"
       return 0
     fi
@@ -529,17 +460,19 @@ postal_to_coordinates(){
   # Canadian FSA fallback
   if [[ "$postal_upper" =~ ^[A-Z][0-9][A-Z] ]]; then
     local fsa="${postal_upper:0:3}"
-    local city="$(get_canadian_city "$fsa" || true)"
-
+    local city
+    city="$(get_canadian_city "$fsa" || true)"
     if [ -n "$city" ]; then
-      sleep 1  # Rate limit
-      response="$(curl -fsS "https://nominatim.openstreetmap.org/search?q=$(echo "$city" | sed 's/ /%20/g')&format=json&limit=1" 2>/dev/null || true)"
-
+      sleep 1
+      response="$(curl -fsS --connect-timeout 10 \
+        -A "ASL3-Time-Weather/3.0 (github.com/N6LKA/ASL3-Time-Weather-Announcement)" \
+        "https://nominatim.openstreetmap.org/search?q=$(echo "$city" | sed 's/ /%20/g')&format=json&limit=1" \
+        2>/dev/null || true)"
       if [ -n "$response" ] && [ "$response" != "[]" ]; then
-        lat="$(echo "$response" | sed -n 's/.*"lat":"\([^"]*\)".*/\1/p' | head -n1)"
-        lon="$(echo "$response" | sed -n 's/.*"lon":"\([^"]*\)".*/\1/p' | head -n1)"
-
+        lat="$(echo "$response" | grep -oP '"lat":"\K[^"]+' | head -n1 || true)"
+        lon="$(echo "$response" | grep -oP '"lon":"\K[^"]+' | head -n1 || true)"
         if [ -n "$lat" ] && [ -n "$lon" ]; then
+          save_coords "$postal_upper" "$lat" "$lon"
           echo "$lat|$lon"
           return 0
         fi
@@ -547,77 +480,164 @@ postal_to_coordinates(){
     fi
   fi
 
+  log "Nominatim lookup failed for $postal_upper"
   return 1
 }
 
-# ---------- Provider: METAR ----------
+# ---------- Provider: NOAA METAR ----------
 fetch_metar(){
-  local icao="$(echo "$1" | toupper)"
+  local icao
+  icao="$(echo "$1" | toupper)"
   local metar temp_f cond
 
-  # Try NOAA Aviation Weather API
-  metar="$(curl --connect-timeout 15 -fsS "https://aviationweather.gov/api/data/metar?ids=${icao}&format=raw&hours=0&taf=false" 2>/dev/null | head -n1 || true)"
+  metar="$(curl --connect-timeout 15 -fsS \
+    "https://aviationweather.gov/api/data/metar?ids=${icao}&format=raw&hours=0&taf=false" \
+    2>/dev/null | head -n1 || true)"
 
-  # Fallback to NWS
   if [ -z "$metar" ]; then
-    metar="$(curl --connect-timeout 15 -fsS "https://tgftp.nws.noaa.gov/data/observations/metar/stations/${icao}.TXT" 2>/dev/null | tail -n1 || true)"
+    metar="$(curl --connect-timeout 15 -fsS \
+      "https://tgftp.nws.noaa.gov/data/observations/metar/stations/${icao}.TXT" \
+      2>/dev/null | tail -n1 || true)"
   fi
 
-  [ -z "$metar" ] && return 1
+  [ -z "$metar" ] && { log "METAR: no data for $icao"; return 1; }
 
-  temp_f="$(parse_metar_temp_f "$metar" || true)"
-  [ -z "$temp_f" ] && return 1
+  local pair chunk sign num t_c_raw
+  pair="$(printf '%s' "$metar" | grep -oE ' [M]?[0-9]{2}/[M]?[0-9]{2} ' | head -n1 || true)"
+  [ -z "$pair" ] && { log "METAR: no temp in report for $icao"; return 1; }
+
+  pair="$(printf '%s' "$pair" | tr -d ' ')"
+  chunk="${pair%%/*}"
+  if [ "${chunk#M}" != "$chunk" ]; then sign='-'; num="${chunk#M}"; else sign=''; num="$chunk"; fi
+  num="${num##0}"; [ -z "$num" ] && num=0
+  t_c_raw="${sign}${num}"
+  temp_f="$(awk -v c="$t_c_raw" 'BEGIN{printf "%.0f", (c*9/5)+32}')"
 
   cond="$(metar_condition_word "$metar")"
-  echo "$temp_f|$cond"
+  log "METAR: ${icao} temp=${temp_f}F cond=${cond}"
+  # format: temp_f|cond|feels_like_f|humidity (METAR does not provide feels-like or humidity)
+  echo "${temp_f}|${cond}||"
 }
 
 # ---------- Provider: Open-Meteo ----------
 fetch_openmeteo(){
   local location="$1"
+  local coords lat lon
 
-  # Check if it's a special location first
-  local coords
   if is_special_location "$location"; then
     coords="$(get_special_coordinates "$location")"
+  elif is_icao_code "$(echo "$location" | toupper)"; then
+    # Fetch ICAO station coords via aviationweather
+    local icao
+    icao="$(echo "$location" | toupper)"
+    local info
+    info="$(curl --connect-timeout 10 -fsS \
+      "https://aviationweather.gov/api/data/airport?ids=${icao}&format=json" \
+      2>/dev/null || true)"
+    lat="$(echo "$info" | grep -oP '"lat":\K[-0-9.]+' | head -n1 || true)"
+    lon="$(echo "$info" | grep -oP '"lon":\K[-0-9.]+' | head -n1 || true)"
+    [ -n "$lat" ] && [ -n "$lon" ] && coords="${lat}|${lon}" || coords=""
   else
-    # Get coordinates from postal code
     coords="$(postal_to_coordinates "$location" || true)"
   fi
 
-  [ -z "$coords" ] && return 1
+  [ -z "$coords" ] && { log "OpenMeteo: could not resolve coords for $location"; return 1; }
 
   lat="${coords%%|*}"
   lon="${coords##*|}"
-  [ -z "$lat" ] || [ -z "$lon" ] && return 1
 
-  # Fetch weather from Open-Meteo with is_day for day/night detection
-  local data temp code isday
-  data="$(curl -fsS "https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code,is_day&temperature_unit=fahrenheit&timezone=auto" 2>/dev/null || true)"
+  local data temp code isday feels humidity
+  data="$(curl -fsS --connect-timeout 15 \
+    "https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,is_day&temperature_unit=fahrenheit&timezone=auto" \
+    2>/dev/null || true)"
 
-  temp="$(echo "$data" | sed -n 's/.*"temperature_2m":\s*\([-0-9.]\+\).*/\1/p' | head -n1)"
-  code="$(echo "$data" | sed -n 's/.*"weather_code":\s*\([0-9]\+\).*/\1/p' | head -n1)"
-  isday="$(echo "$data" | sed -n 's/.*"is_day":\s*\([01]\).*/\1/p' | head -n1)"
+  [ -z "$data" ] && { log "OpenMeteo: empty response for $location"; return 1; }
 
-  [ -z "$temp" ] && return 1
+  temp="$(echo "$data"    | grep -oP '"temperature_2m":\K[-0-9.]+' | head -n1 || true)"
+  feels="$(echo "$data"   | grep -oP '"apparent_temperature":\K[-0-9.]+' | head -n1 || true)"
+  humidity="$(echo "$data"| grep -oP '"relative_humidity_2m":\K[0-9]+' | head -n1 || true)"
+  code="$(echo "$data"    | grep -oP '"weather_code":\K[0-9]+' | head -n1 || true)"
+  isday="$(echo "$data"   | grep -oP '"is_day":\K[01]' | head -n1 || true)"
 
-  local tf="$(round "$temp")"
+  [ -z "$temp" ] && { log "OpenMeteo: could not parse temperature for $location"; return 1; }
+
+  local tf fl
+  tf="$(round "$temp")"
+  fl="$([ -n "$feels" ] && round "$feels" || echo "")"
   [ -z "$isday" ] && isday="1"
-  local cond="$(openmeteo_condition_word "${code:-0}" "${isday}")"
+  local cond
+  cond="$(openmeteo_condition_word "${code:-0}" "${isday}")"
 
-  echo "$tf|$cond"
+  log "OpenMeteo: $location temp=${tf}F feels=${fl}F humidity=${humidity}% cond=${cond}"
+  echo "${tf}|${cond}|${fl}|${humidity}"
+}
+
+# ---------- Provider: WeatherFlow Tempest ----------
+fetch_tempest(){
+  local token="${TempestToken:-}"
+  local station="${TempestStationID:-}"
+
+  if [ -z "$token" ]; then
+    log "Tempest: TempestToken not configured"
+    return 1
+  fi
+
+  # Auto-detect station if not set
+  if [ -z "$station" ]; then
+    log "Tempest: TempestStationID not set, attempting auto-detect"
+    local stations_json
+    stations_json="$(curl -fsS --connect-timeout 10 \
+      "https://swd.weatherflow.com/swd/rest/stations?token=${token}" \
+      2>/dev/null || true)"
+    station="$(echo "$stations_json" | grep -oP '"station_id":\K[0-9]+' | head -n1 || true)"
+    if [ -z "$station" ]; then
+      log "Tempest: could not auto-detect station ID"
+      return 1
+    fi
+    log "Tempest: auto-detected station $station"
+  fi
+
+  local data
+  data="$(curl -fsS --connect-timeout 15 \
+    "https://swd.weatherflow.com/swd/rest/better_forecast?station_id=${station}&units_temp=f&units_wind=mph&units_pressure=mb&units_precip=in&units_distance=mi&token=${token}" \
+    2>/dev/null || true)"
+
+  [ -z "$data" ] && { log "Tempest: empty response for station $station"; return 1; }
+
+  local temp feels humidity cond_text cond
+  temp="$(echo "$data"     | grep -oP '"air_temperature":\K[-0-9.]+' | head -n1 || true)"
+  feels="$(echo "$data"    | grep -oP '"feels_like":\K[-0-9.]+' | head -n1 || true)"
+  humidity="$(echo "$data" | grep -oP '"relative_humidity":\K[0-9]+' | head -n1 || true)"
+  cond_text="$(echo "$data"| grep -oP '"conditions":"\K[^"]+' | head -n1 || true)"
+
+  [ -z "$temp" ] && { log "Tempest: could not parse temperature for station $station"; return 1; }
+
+  local tf fl
+  tf="$(round "$temp")"
+  fl="$([ -n "$feels" ] && round "$feels" || echo "")"
+  cond="$(tempest_condition_word "${cond_text:-clear}")"
+
+  log "Tempest: station=$station temp=${tf}F feels=${fl}F humidity=${humidity}% cond=${cond} raw_cond='${cond_text}'"
+  echo "${tf}|${cond}|${fl}|${humidity}"
 }
 
 # ---------- Main ----------
-if [ -z "$location_arg" ]; then
+if [ -z "$location_arg" ] && [ "$provider" != "tempest" ]; then
   show_help
 fi
 
-arg="$location_arg"
+arg="${location_arg:-}"
 result=""
 
-# Check if ICAO code (4 letters)
-if is_icao_code "$(echo "$arg" | toupper)"; then
+log "Starting weather fetch: provider=$provider location='$arg'"
+
+if [ "$provider" = "tempest" ]; then
+  result="$(fetch_tempest || true)"
+  if [ -z "$result" ]; then
+    log "Tempest failed, falling back to openmeteo"
+    [ -n "$arg" ] && result="$(fetch_openmeteo "$arg" || true)"
+  fi
+elif is_icao_code "$(echo "$arg" | toupper)"; then
   if [ "$provider" = "openmeteo" ]; then
     result="$(fetch_openmeteo "$arg" || true)"
     [ -z "$result" ] && result="$(fetch_metar "$arg" || true)"
@@ -625,7 +645,6 @@ if is_icao_code "$(echo "$arg" | toupper)"; then
     result="$(fetch_metar "$arg" || true)"
     [ -z "$result" ] && result="$(fetch_openmeteo "$arg" || true)"
   fi
-# Check if special location
 elif is_special_location "$arg"; then
   result="$(fetch_openmeteo "$arg" || true)"
 else
@@ -639,28 +658,66 @@ else
   fi
 fi
 
-[ -z "$result" ] && { echo "No Report"; exit 1; }
+if [ -z "$result" ]; then
+  log "All providers failed for location='$arg'"
+  echo "No weather data available"
+  exit 1
+fi
 
+# Parse result: temp_f|cond|feels_like_f|humidity
 temp_f="${result%%|*}"
-cond="${result##*|}"
+rest="${result#*|}"
+cond="${rest%%|*}"
+rest="${rest#*|}"
+feels_f="${rest%%|*}"
+humidity="${rest##*|}"
+
 ctemp="$(awk -v f="$temp_f" 'BEGIN{printf "%.0f", (f-32)*5/9}')"
+
+# Feels-like in C
+if [ -n "$feels_f" ]; then
+  feels_c="$(awk -v f="$feels_f" 'BEGIN{printf "%.0f", (f-32)*5/9}')"
+else
+  feels_c=""
+fi
 
 # ---------- Output ----------
 if [ "$display_mode" = "v" ]; then
-  echo -e "${temp_f}°F, ${ctemp}°C / ${cond}"
+  echo "${temp_f}°F, ${ctemp}°C / ${cond}"
+  [ -n "$feels_f" ] && echo "Feels like: ${feels_f}°F, ${feels_c}°C"
+  [ -n "$humidity" ] && echo "Humidity: ${humidity}%"
   exit 0
 fi
 
-rm -f "$destdir/temperature" "$destdir/condition.gsm"
-
+# Write temperature atomically
 if [ "${Temperature_mode:-F}" = "C" ]; then
-  echo "$ctemp" > "$destdir/temperature"
+  echo "$ctemp" > "$DESTDIR/temperature.new" && mv "$DESTDIR/temperature.new" "$DESTDIR/temperature"
 else
-  echo "$temp_f" > "$destdir/temperature"
+  echo "$temp_f" > "$DESTDIR/temperature.new" && mv "$DESTDIR/temperature.new" "$DESTDIR/temperature"
 fi
 
+# Write feels-like atomically (if enabled and available)
+if [ "${ANNOUNCE_FEELS_LIKE:-no}" = "yes" ] && [ -n "$feels_f" ]; then
+  if [ "${Temperature_mode:-F}" = "C" ]; then
+    echo "$feels_c" > "$DESTDIR/feels-like.new" && mv "$DESTDIR/feels-like.new" "$DESTDIR/feels-like"
+  else
+    echo "$feels_f" > "$DESTDIR/feels-like.new" && mv "$DESTDIR/feels-like.new" "$DESTDIR/feels-like"
+  fi
+else
+  rm -f "$DESTDIR/feels-like"
+fi
+
+# Write humidity atomically (if enabled and available)
+if [ "${ANNOUNCE_HUMIDITY:-no}" = "yes" ] && [ -n "$humidity" ]; then
+  echo "$humidity" > "$DESTDIR/humidity.new" && mv "$DESTDIR/humidity.new" "$DESTDIR/humidity"
+else
+  rm -f "$DESTDIR/humidity"
+fi
+
+# Write condition sound file
 if [ "${process_condition:-YES}" = "YES" ]; then
   write_condition_gsm "$cond"
 fi
 
+log "Weather written: temp=${temp_f}F cond=${cond}"
 exit 0
