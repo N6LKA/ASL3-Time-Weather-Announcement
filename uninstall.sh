@@ -77,12 +77,6 @@ remove_saytime_from_crontab "asterisk" -u asterisk
 remove_saytime_from_crontab "root"
 
 
-# --- Remove Supermon compatibility symlink ---
-if [[ -L /usr/local/sbin/supermon/weather.sh ]]; then
-    rm -f /usr/local/sbin/supermon/weather.sh
-    echo -e "${GREEN}Removed /usr/local/sbin/supermon/weather.sh symlink.${NC}"
-fi
-
 # --- Remove install directory ---
 if [[ -d "$INSTALL_DIR" ]]; then
     echo "Removing $INSTALL_DIR..."
