@@ -11,8 +11,8 @@
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 
-# Branch is set at install time — develop branch install.sh has BRANCH=develop
-BRANCH="${BRANCH:-main}"
+# On the develop branch this defaults to develop; on main it defaults to main.
+BRANCH="${BRANCH:-develop}"
 REPO="https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/${BRANCH}"
 SOUND_ZIP_URL="${REPO}/sound_files.zip"
 
