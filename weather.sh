@@ -321,29 +321,39 @@ tempest_condition_word(){
 
 # ---------- Write Condition Sound File ----------
 write_condition_gsm(){
-  local word="$1"
-  local file1=""
-
-  for dir in \
-    /usr/local/share/asterisk/sounds/custom \
-    /usr/share/asterisk/sounds/en/wx \
-    /var/lib/asterisk/sounds \
+  local phrase="$1"
+  local sound_dirs=(
+    /usr/local/share/asterisk/sounds/custom
+    /usr/share/asterisk/sounds/en/wx
+    /var/lib/asterisk/sounds
     /usr/share/asterisk/sounds/en
-  do
-    if [ -f "${dir}/${word}.gsm" ]; then
-      file1="${dir}/${word}.gsm"
-      break
-    fi
-    if [ -f "${dir}/${word}.ulaw" ]; then
-      file1="${dir}/${word}.ulaw"
-      break
+  )
+
+  find_sound_file(){
+    local w="$1"
+    for dir in "${sound_dirs[@]}"; do
+      [ -f "${dir}/${w}.gsm"  ] && { echo "${dir}/${w}.gsm";  return 0; }
+      [ -f "${dir}/${w}.ulaw" ] && { echo "${dir}/${w}.ulaw"; return 0; }
+    done
+    return 1
+  }
+
+  # Handle multi-word conditions (e.g. "partly cloudy") by concatenating each word's file
+  local files=()
+  for word in $phrase; do
+    local f
+    f="$(find_sound_file "$word" || true)"
+    if [ -n "$f" ]; then
+      files+=("$f")
+    else
+      log "No sound file found for condition word: $word"
     fi
   done
 
-  if [ -n "$file1" ]; then
-    cat "$file1" > "$DESTDIR/condition.gsm.new" && mv "$DESTDIR/condition.gsm.new" "$DESTDIR/condition.gsm"
+  if [ "${#files[@]}" -gt 0 ]; then
+    cat "${files[@]}" > "$DESTDIR/condition.gsm.new" && mv "$DESTDIR/condition.gsm.new" "$DESTDIR/condition.gsm"
   else
-    log "No sound file found for condition: $word"
+    log "No sound file found for any word in condition: $phrase"
     rm -f "$DESTDIR/condition.gsm"
   fi
 }
