@@ -103,8 +103,14 @@ unless (-f $wxsh) {
 # ---------- Refresh weather cache ----------
 # weather.sh exits 0 immediately if cache is already fresh (systemd timer case).
 # If cache is stale it fetches and writes /tmp/temperature, /tmp/condition.gsm, etc.
+# Run as the asterisk user so file ownership is consistent with the systemd timer.
+# When already running as asterisk (cron) this is a no-op passthrough.
 if ($wx eq "YES") {
-    system($wxsh, $wxid);
+    if ($> == 0) {
+        system("runuser", "-u", "asterisk", "--", $wxsh, $wxid);
+    } else {
+        system($wxsh, $wxid);
+    }
 }
 
 # ---------- Read weather data ----------
