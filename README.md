@@ -25,20 +25,23 @@ Supports US ZIP codes, ICAO airport codes, Canadian postal codes, international 
 
 ## Installation
 
-### Stable (main branch)
+### Stable (recommended)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/main/install.sh)
+curl -fsSL -H "Cache-Control: no-cache" https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/main/install.sh | sudo bash
 ```
 
 ### Development / Testing (develop branch)
 
+> ⚠️ **Warning:** `develop` may contain incomplete or untested changes. Only use this on a system you can afford to break.
+
 ```bash
-BRANCH=develop bash <(curl -fsSL https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/develop/install.sh)
+curl -fsSL "https://github.com/N6LKA/ASL3-Time-Weather-Announcement/archive/refs/heads/develop.tar.gz" \
+  | tar -xzO ASL3-Time-Weather-Announcement-develop/install.sh \
+  | sudo bash -s -- --branch develop
 ```
 
-> After develop is merged to main, the dev install command becomes:
-> `BRANCH=develop bash <(curl -fsSL https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/main/install.sh)`
+The tarball form is used instead of the raw GitHub URL because `raw.githubusercontent.com` is CDN-cached and can serve a stale `install.sh`; the tarball goes through GitHub's codeload service which always returns the current commit.
 
 The installer will prompt for:
 - **ZIP code or ICAO airport code** — your location (e.g. `90210` or `KJFK`)

@@ -10,12 +10,25 @@
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
+#
+# Usage (stable):
+#   curl -fsSL -H "Cache-Control: no-cache" https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/main/install.sh | sudo bash
+#
+# Usage (develop):
+#   curl -fsSL "https://github.com/N6LKA/ASL3-Time-Weather-Announcement/archive/refs/heads/develop.tar.gz" \
+#     | tar -xzO ASL3-Time-Weather-Announcement-develop/install.sh \
+#     | sudo bash -s -- --branch develop
+#   (tarball form bypasses raw.githubusercontent.com CDN cache for install.sh itself;
+#    --branch is passed as an arg, not an env var, because env vars before sudo don't
+#    reliably survive the sudo call on all systems)
 
-# Default is set per-branch. After merging to main, use:
-#   BRANCH=develop bash <(curl -fsSL .../main/install.sh)
-BRANCH="${BRANCH:-develop}"
-REPO="https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/${BRANCH}"
-SOUND_ZIP_URL="${REPO}/sound_files.zip"
+BRANCH="main"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --branch) BRANCH="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
 
 INSTALL_DIR="/etc/asterisk/scripts/saytime-weather"
 SOUNDS_DIR="/usr/local/share/asterisk/sounds/custom"
@@ -40,6 +53,24 @@ if [[ $EUID -ne 0 ]]; then
     echo -e "${RED}ERROR: This installer must be run as root or with sudo.${NC}"
     exit 1
 fi
+
+# --- Download repo as single tarball (codeload bypasses CDN cache) ---
+REPO_TMP_DIR="$(mktemp -d /tmp/saytime-install.XXXXXX)"
+trap 'rm -rf "$REPO_TMP_DIR"' EXIT
+
+echo "Downloading ASL3-Time-Weather-Announcement (${BRANCH})..."
+if ! curl -fsSL \
+    "https://github.com/N6LKA/ASL3-Time-Weather-Announcement/archive/refs/heads/${BRANCH}.tar.gz" \
+    -o "$REPO_TMP_DIR/repo.tar.gz"; then
+    echo -e "${RED}ERROR: Could not download repo archive for branch '${BRANCH}'.${NC}"
+    exit 1
+fi
+tar -xzf "$REPO_TMP_DIR/repo.tar.gz" -C "$REPO_TMP_DIR" --strip-components=1
+
+fetch_repo_file() {
+    local path="$1" dest="$2"
+    cp "$REPO_TMP_DIR/$path" "$dest"
+}
 
 # --- Detect existing install ---
 EXISTING_INSTALL=false
@@ -149,22 +180,19 @@ mkdir -p "$INSTALL_DIR"
 chown asterisk:asterisk "$INSTALL_DIR"
 chmod 755 "$INSTALL_DIR"
 
-# --- Download scripts ---
-echo "Downloading saytime.pl..."
-curl -fsSL -H "Cache-Control: no-cache" "$REPO/saytime.pl" -o "$INSTALL_DIR/saytime.pl" || {
-    echo -e "${RED}ERROR: Failed to download saytime.pl${NC}"; exit 1; }
+# --- Install scripts ---
+echo "Installing saytime.pl..."
+fetch_repo_file "saytime.pl" "$INSTALL_DIR/saytime.pl"
 chmod +x "$INSTALL_DIR/saytime.pl"
 chown asterisk:asterisk "$INSTALL_DIR/saytime.pl"
 
-echo "Downloading weather.sh..."
-curl -fsSL -H "Cache-Control: no-cache" "$REPO/weather.sh" -o "$INSTALL_DIR/weather.sh" || {
-    echo -e "${RED}ERROR: Failed to download weather.sh${NC}"; exit 1; }
+echo "Installing weather.sh..."
+fetch_repo_file "weather.sh" "$INSTALL_DIR/weather.sh"
 chmod +x "$INSTALL_DIR/weather.sh"
 chown asterisk:asterisk "$INSTALL_DIR/weather.sh"
 
-echo "Downloading uninstall.sh..."
-curl -fsSL -H "Cache-Control: no-cache" "$REPO/uninstall.sh" -o "$INSTALL_DIR/uninstall.sh" || {
-    echo -e "${YELLOW}WARNING: Failed to download uninstall.sh (non-fatal)${NC}"; }
+echo "Installing uninstall.sh..."
+fetch_repo_file "uninstall.sh" "$INSTALL_DIR/uninstall.sh" 2>/dev/null || true
 [[ -f "$INSTALL_DIR/uninstall.sh" ]] && chmod +x "$INSTALL_DIR/uninstall.sh" && \
     chown asterisk:asterisk "$INSTALL_DIR/uninstall.sh"
 
@@ -177,9 +205,8 @@ chmod 644 "$INSTALL_DIR/weather-location.env"
 
 # --- Write or update weather.ini ---
 if [[ ! -f "$INSTALL_DIR/weather.ini" ]]; then
-    echo "Downloading weather.ini..."
-    curl -fsSL -H "Cache-Control: no-cache" "$REPO/weather.ini" -o "$INSTALL_DIR/weather.ini" || {
-        echo -e "${RED}ERROR: Failed to download weather.ini${NC}"; exit 1; }
+    echo "Installing weather.ini..."
+    fetch_repo_file "weather.ini" "$INSTALL_DIR/weather.ini"
     chown asterisk:asterisk "$INSTALL_DIR/weather.ini"
     chmod 644 "$INSTALL_DIR/weather.ini"
     echo -e "${GREEN}Configuration file created: $INSTALL_DIR/weather.ini${NC}"
@@ -210,15 +237,8 @@ echo "--- Installing sound files ---"
 mkdir -p "$SOUNDS_DIR"
 chown asterisk:asterisk "$SOUNDS_DIR"
 
-ZIP_FILE=$(mktemp /tmp/sound_files.XXXXXX.zip)
-echo "Downloading sound_files.zip..."
-curl -fsSL -H "Cache-Control: no-cache" "$SOUND_ZIP_URL" -o "$ZIP_FILE" || {
-    echo -e "${RED}ERROR: Failed to download sound_files.zip${NC}"
-    rm -f "$ZIP_FILE"; exit 1; }
-
 echo "Extracting sound files..."
-unzip -o "$ZIP_FILE" -d "$SOUNDS_DIR" > /dev/null 2>&1
-rm -f "$ZIP_FILE"
+unzip -o "$REPO_TMP_DIR/sound_files.zip" -d "$SOUNDS_DIR" > /dev/null 2>&1
 
 find "$SOUNDS_DIR" -type f -name "*.gsm"  -exec chown asterisk:asterisk {} \; -exec chmod 644 {} \;
 find "$SOUNDS_DIR" -type d -exec chown asterisk:asterisk {} \; -exec chmod 755 {} \;
@@ -228,16 +248,9 @@ echo "Sound files installed."
 echo ""
 echo "--- Setting up systemd weather timer ---"
 
-# Download and install systemd units
-curl -fsSL -H "Cache-Control: no-cache" \
-    "$REPO/systemd/asl3-saytime-weather.service" \
-    -o "$SYSTEMD_DIR/asl3-saytime-weather.service" || {
-    echo -e "${RED}ERROR: Failed to download systemd service unit${NC}"; exit 1; }
-
-curl -fsSL -H "Cache-Control: no-cache" \
-    "$REPO/systemd/asl3-saytime-weather.timer" \
-    -o "$SYSTEMD_DIR/asl3-saytime-weather.timer" || {
-    echo -e "${RED}ERROR: Failed to download systemd timer unit${NC}"; exit 1; }
+# Install systemd units
+fetch_repo_file "systemd/asl3-saytime-weather.service" "$SYSTEMD_DIR/asl3-saytime-weather.service"
+fetch_repo_file "systemd/asl3-saytime-weather.timer"   "$SYSTEMD_DIR/asl3-saytime-weather.timer"
 
 systemctl daemon-reload
 systemctl enable --now asl3-saytime-weather.timer
