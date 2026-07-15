@@ -270,23 +270,33 @@ if echo "$ROOT_CRON" | grep -q "saytime\.pl"; then
 fi
 
 # Add to asterisk crontab if not already present
-CURRENT_ASTERISK_CRON=$(crontab -u asterisk -l 2>/dev/null || true)
+# Use a temp file approach — more reliable than piping on all systems
+ASTERISK_CRONTAB_FILE=$(mktemp /tmp/asterisk-cron.XXXXXX)
+crontab -u asterisk -l 2>/dev/null > "$ASTERISK_CRONTAB_FILE" || true
 
-if echo "$CURRENT_ASTERISK_CRON" | grep -q "saytime\.pl"; then
+if grep -q "saytime\.pl" "$ASTERISK_CRONTAB_FILE" 2>/dev/null; then
     echo -e "${YELLOW}Existing saytime.pl entry found in asterisk crontab — skipping.${NC}"
     echo "To update it manually: crontab -u asterisk -e"
 else
-    NEW_ASTERISK_CRON=$(echo "$CURRENT_ASTERISK_CRON"; echo ""; echo "$CRON_COMMENT"; echo "$CRON_JOB")
-    echo "$NEW_ASTERISK_CRON" | crontab -u asterisk -
+    {
+        cat "$ASTERISK_CRONTAB_FILE"
+        echo ""
+        echo "$CRON_COMMENT"
+        echo "$CRON_JOB"
+    } > "${ASTERISK_CRONTAB_FILE}.new"
+    crontab -u asterisk "${ASTERISK_CRONTAB_FILE}.new"
     # Verify it actually landed there
     if crontab -u asterisk -l 2>/dev/null | grep -q "saytime\.pl"; then
         echo -e "${GREEN}Cron job added to asterisk crontab (runs hourly at top of the hour).${NC}"
     else
-        echo -e "${RED}WARNING: Failed to write to asterisk crontab. Add this line manually:${NC}"
-        echo "  crontab -u asterisk -e"
+        echo -e "${RED}WARNING: Could not write to asterisk crontab automatically.${NC}"
+        echo "Add the following line manually with: crontab -u asterisk -e"
+        echo ""
         echo "  $CRON_JOB"
+        echo ""
     fi
 fi
+rm -f "$ASTERISK_CRONTAB_FILE" "${ASTERISK_CRONTAB_FILE}.new"
 
 # --- Update plocate database ---
 echo ""
