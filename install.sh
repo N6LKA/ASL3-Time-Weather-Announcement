@@ -257,6 +257,11 @@ systemctl enable --now asl3-saytime-weather.timer
 echo -e "${GREEN}Weather timer enabled (runs every 10 minutes).${NC}"
 
 # Run an immediate weather fetch so files are ready now
+# Remove any stale /tmp cache files (may be owned by a different user from
+# previous runs) so the asterisk-owned systemd service starts with a clean slate.
+rm -f /tmp/temperature /tmp/condition.gsm /tmp/feels-like /tmp/humidity \
+       /tmp/temperature.new /tmp/condition.gsm.new
+
 echo "Running initial weather fetch..."
 systemctl start asl3-saytime-weather.service 2>/dev/null || \
     su -s /bin/bash asterisk -c "$INSTALL_DIR/weather.sh $WEATHER_LOCATION" 2>/dev/null || true
