@@ -34,7 +34,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Anno
 ### Development / Testing (develop branch)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/develop/install.sh)
+BRANCH=develop bash <(curl -fsSL https://raw.githubusercontent.com/N6LKA/ASL3-Time-Weather-Announcement/main/install.sh)
 ```
 
 The installer will prompt for:
