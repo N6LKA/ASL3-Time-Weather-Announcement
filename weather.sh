@@ -683,9 +683,12 @@ fi
 
 # ---------- Output ----------
 if [ "$display_mode" = "v" ]; then
+  # Single-line output — Supermon reads this via PHP exec() which returns only
+  # the last line, so verbose mode must always be exactly one line.
   echo "${temp_f}°F, ${ctemp}°C / ${cond}"
-  [ -n "$feels_f" ] && echo "Feels like: ${feels_f}°F, ${feels_c}°C"
-  [ -n "$humidity" ] && echo "Humidity: ${humidity}%"
+  # Log extra detail for debugging without breaking the single-line guarantee
+  [ -n "$feels_f" ] && log "Feels like: ${feels_f}°F, ${feels_c}°C"
+  [ -n "$humidity" ] && log "Humidity: ${humidity}%"
   exit 0
 fi
 

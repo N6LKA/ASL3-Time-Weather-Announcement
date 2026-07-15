@@ -198,6 +198,11 @@ fetch_repo_file "uninstall.sh" "$INSTALL_DIR/uninstall.sh" 2>/dev/null || true
 [[ -f "$INSTALL_DIR/uninstall.sh" ]] && chmod +x "$INSTALL_DIR/uninstall.sh" && \
     chown asterisk:asterisk "$INSTALL_DIR/uninstall.sh"
 
+# --- Supermon compatibility symlink ---
+# Supermon's link.php calls /usr/local/sbin/weather.sh directly.
+ln -sf "$INSTALL_DIR/weather.sh" /usr/local/sbin/weather.sh
+echo "Supermon symlink: /usr/local/sbin/weather.sh -> $INSTALL_DIR/weather.sh"
+
 # --- Write location environment file (used by systemd service) ---
 cat > "$INSTALL_DIR/weather-location.env" <<EOF
 WEATHER_LOCATION=${WEATHER_LOCATION}
