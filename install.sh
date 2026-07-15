@@ -107,12 +107,14 @@ echo ""
 echo "--- Configuration ---"
 
 # --- Location ---
+# Read from /dev/tty so prompts work when this script is piped (curl|tar|bash).
+# Falls back to existing value silently if no controlling terminal is available.
 if [[ -n "$EXISTING_LOCATION" ]]; then
-    read -rp "ZIP code or Airport/ICAO code [$EXISTING_LOCATION]: " LOC_INPUT
+    read -rp "ZIP code or Airport/ICAO code [$EXISTING_LOCATION]: " LOC_INPUT < /dev/tty || true
     WEATHER_LOCATION="${LOC_INPUT:-$EXISTING_LOCATION}"
 else
     while true; do
-        read -rp "Enter your ZIP code or Airport/ICAO code (e.g. 90210 or KJFK): " WEATHER_LOCATION
+        read -rp "Enter your ZIP code or Airport/ICAO code (e.g. 90210 or KJFK): " WEATHER_LOCATION < /dev/tty || true
         WEATHER_LOCATION=$(echo "$WEATHER_LOCATION" | tr -d ' ')
         [[ -n "$WEATHER_LOCATION" ]] && break
         echo -e "${RED}Location is required.${NC}"
@@ -121,11 +123,11 @@ fi
 
 # --- Node number ---
 if [[ -n "$EXISTING_NODE" ]]; then
-    read -rp "ASL3 node number [$EXISTING_NODE]: " NODE_INPUT
+    read -rp "ASL3 node number [$EXISTING_NODE]: " NODE_INPUT < /dev/tty || true
     NODE_NUMBER="${NODE_INPUT:-$EXISTING_NODE}"
 else
     while true; do
-        read -rp "Enter your ASL3 node number: " NODE_NUMBER
+        read -rp "Enter your ASL3 node number: " NODE_NUMBER < /dev/tty || true
         NODE_NUMBER=$(echo "$NODE_NUMBER" | tr -d ' ')
         [[ -n "$NODE_NUMBER" ]] && break
         echo -e "${RED}Node number is required.${NC}"
@@ -133,7 +135,7 @@ else
 fi
 
 # --- Time format ---
-read -rp "Time format - 12-hour or 24-hour? [$EXISTING_TIME_FORMAT]: " TF_INPUT
+read -rp "Time format - 12-hour or 24-hour? [$EXISTING_TIME_FORMAT]: " TF_INPUT < /dev/tty || true
 TIME_FORMAT="${TF_INPUT:-$EXISTING_TIME_FORMAT}"
 [[ "$TIME_FORMAT" != "24" ]] && TIME_FORMAT="12"
 
@@ -143,15 +145,15 @@ echo -e "${CYAN}--- Tempest Weather Station (optional) ---${NC}"
 echo "If you have a WeatherFlow Tempest station, enter your API token and"
 echo "station ID to use your personal weather data instead of public APIs."
 echo "Get your token at: https://tempestwx.com/settings/tokens"
-echo "Leave blank to skip (uses NOAA METAR / Open-Meteo instead)."
+echo "Leave blank to keep existing / skip (uses NOAA METAR / Open-Meteo instead)."
 echo ""
 
-read -rp "Tempest API token [${EXISTING_TEMPEST_TOKEN:-none}]: " TEMPEST_TOKEN_INPUT
+read -rp "Tempest API token [${EXISTING_TEMPEST_TOKEN:-none}]: " TEMPEST_TOKEN_INPUT < /dev/tty || true
 TEMPEST_TOKEN="${TEMPEST_TOKEN_INPUT:-$EXISTING_TEMPEST_TOKEN}"
 
 TEMPEST_STATION=""
 if [[ -n "$TEMPEST_TOKEN" ]]; then
-    read -rp "Tempest station ID [${EXISTING_TEMPEST_STATION:-auto-detect}]: " TEMPEST_STATION_INPUT
+    read -rp "Tempest station ID [${EXISTING_TEMPEST_STATION:-auto-detect}]: " TEMPEST_STATION_INPUT < /dev/tty || true
     TEMPEST_STATION="${TEMPEST_STATION_INPUT:-$EXISTING_TEMPEST_STATION}"
 fi
 
@@ -221,15 +223,13 @@ if [[ -n "$TEMPEST_TOKEN" ]]; then
     sed -i "s|^TempestToken=.*|TempestToken=\"${TEMPEST_TOKEN}\"|" "$INSTALL_DIR/weather.ini"
     sed -i "s|^TempestStationID=.*|TempestStationID=\"${TEMPEST_STATION}\"|" "$INSTALL_DIR/weather.ini"
     sed -i "s|^DEFAULT_PROVIDER=.*|DEFAULT_PROVIDER=\"tempest\"|" "$INSTALL_DIR/weather.ini"
-else
-    # Clear any existing Tempest config if user left it blank
+elif [[ "$EXISTING_INSTALL" != "true" ]]; then
+    # Fresh install with no Tempest configured — ensure fields start blank
     sed -i 's|^TempestToken=.*|TempestToken=""|' "$INSTALL_DIR/weather.ini"
     sed -i 's|^TempestStationID=.*|TempestStationID=""|' "$INSTALL_DIR/weather.ini"
-    # Only reset provider if it was tempest (don't override user's custom choice)
-    current_provider=$(grep -oP 'DEFAULT_PROVIDER="\K[^"]+' "$INSTALL_DIR/weather.ini" 2>/dev/null || echo "auto")
-    [[ "$current_provider" == "tempest" ]] && \
-        sed -i 's|^DEFAULT_PROVIDER=.*|DEFAULT_PROVIDER="auto"|' "$INSTALL_DIR/weather.ini"
 fi
+# On an existing install with no new token entered, leave the ini untouched —
+# never wipe credentials the user already has configured.
 
 # --- Sound files ---
 echo ""
