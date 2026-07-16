@@ -260,11 +260,27 @@ echo -e "${GREEN}Weather timer enabled (runs every 10 minutes).${NC}"
 # Remove any stale /tmp cache files (may be owned by a different user from
 # previous runs) so the asterisk-owned systemd service starts with a clean slate.
 rm -f /tmp/temperature /tmp/condition.gsm /tmp/feels-like /tmp/humidity \
-       /tmp/temperature.new /tmp/condition.gsm.new
+       /tmp/temperature.new /tmp/condition.gsm.new /tmp/weather-display /tmp/weather-display.new
 
 echo "Running initial weather fetch..."
 systemctl start asl3-saytime-weather.service 2>/dev/null || \
     su -s /bin/bash asterisk -c "$INSTALL_DIR/weather.sh $WEATHER_LOCATION" 2>/dev/null || true
+
+# --- Supermon integration ---
+SUPERMON_WEATHER="/usr/local/sbin/supermon/weather.sh"
+if [ -d "/usr/local/sbin/supermon" ]; then
+    echo ""
+    echo "--- Supermon integration ---"
+    if [ -L "$SUPERMON_WEATHER" ]; then
+        ln -sf "$INSTALL_DIR/weather.sh" "$SUPERMON_WEATHER"
+        echo -e "${GREEN}Supermon weather.sh symlink updated.${NC}"
+    elif [ -f "$SUPERMON_WEATHER" ]; then
+        echo "Backing up existing Supermon weather.sh..."
+        cp "$SUPERMON_WEATHER" "${SUPERMON_WEATHER}.bak"
+        ln -sf "$INSTALL_DIR/weather.sh" "$SUPERMON_WEATHER"
+        echo -e "${GREEN}Supermon weather.sh linked (original backed up to .bak).${NC}"
+    fi
+fi
 
 # --- Asterisk crontab: hourly saytime.pl announcement ---
 echo ""

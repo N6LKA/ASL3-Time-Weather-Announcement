@@ -77,6 +77,20 @@ remove_saytime_from_crontab "asterisk" -u asterisk
 remove_saytime_from_crontab "root"
 
 
+# --- Restore Supermon weather.sh (if we created the symlink) ---
+SUPERMON_WEATHER="/usr/local/sbin/supermon/weather.sh"
+if [ -L "$SUPERMON_WEATHER" ]; then
+    echo "Removing Supermon weather.sh symlink..."
+    rm -f "$SUPERMON_WEATHER"
+    if [ -f "${SUPERMON_WEATHER}.bak" ]; then
+        mv "${SUPERMON_WEATHER}.bak" "$SUPERMON_WEATHER"
+        echo -e "${GREEN}Supermon weather.sh restored from backup.${NC}"
+    else
+        echo -e "${YELLOW}NOTE: No backup found for Supermon weather.sh.${NC}"
+        echo "Supermon weather display will be unavailable until Supermon is reinstalled."
+    fi
+fi
+
 # --- Remove install directory ---
 if [[ -d "$INSTALL_DIR" ]]; then
     echo "Removing $INSTALL_DIR..."
@@ -89,7 +103,7 @@ fi
 # --- Clean up /tmp files ---
 echo "Cleaning up /tmp cache files..."
 rm -f /tmp/temperature /tmp/condition.gsm /tmp/feels-like /tmp/humidity \
-       /tmp/current-time.gsm /tmp/weather-debug.log
+       /tmp/current-time.gsm /tmp/weather-debug.log /tmp/weather-display
 echo -e "${GREEN}Temp files removed.${NC}"
 
 echo ""

@@ -7,11 +7,16 @@
 # Based on original work by D. Crompton, WA3DSP
 # Modified by:              Joe (KD2NFC)
 # Modified by:              Larry K. Aycock, N6LKA
-# Version:                  3.0.0
+# Version:                  3.1.0
 #
 # Description:
 #   Fetches current weather and writes cached output files for saytime.pl.
 #   Supports NOAA METAR, Open-Meteo, and WeatherFlow Tempest.
+#
+#   Also serves as the Supermon weather.sh (symlinked by install.sh). When
+#   called with the "v" argument, prints one line with temp/humidity/condition/
+#   wind and writes no /tmp files (except the cached weather-display line) —
+#   this is the same output Supermon's link.php displays via exec().
 #
 #   Caches coordinates to avoid repeated Nominatim lookups.
 #   If /tmp/temperature is fresher than CACHE_MAX_AGE_MIN, exits immediately
@@ -38,7 +43,7 @@
 set -uo pipefail
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-VERSION="3.0.0"
+VERSION="3.1.0"
 DESTDIR="/tmp"
 LOG="/tmp/weather-debug.log"
 
@@ -129,7 +134,7 @@ CONFIG_PATHS=(
   "/etc/asterisk/local/weather.ini"
   "/etc/asterisk/weather.ini"
   "/usr/local/etc/weather.ini"
-  "$HOME/.weather.ini"
+  "${HOME:-}/.weather.ini"
 )
 
 if [ -n "$opt_config_file" ]; then
@@ -167,12 +172,16 @@ if [ -z "$COORD_CACHE" ]; then
 fi
 
 # ---------- Cache Freshness Check ----------
-# If the temperature file is fresh enough, skip the fetch entirely.
-# The systemd timer is the primary updater; saytime.pl internal calls are no-ops.
-if [ "$opt_no_cache" -eq 0 ] && [ "$display_mode" != "v" ]; then
-  if [ -f "$DESTDIR/temperature" ]; then
-    age_min=$(( ( $(date +%s) - $(date -r "$DESTDIR/temperature" +%s) ) / 60 ))
-    if [ "$age_min" -lt "${CACHE_MAX_AGE_MIN:-12}" ]; then
+# The systemd timer is the primary updater. When the cache is fresh:
+#   - Normal mode (saytime.pl): skip fetch entirely
+#   - Verbose mode (Supermon): serve /tmp/weather-display without an API call
+if [ "$opt_no_cache" -eq 0 ] && [ -f "$DESTDIR/temperature" ]; then
+  age_min=$(( ( $(date +%s) - $(date -r "$DESTDIR/temperature" +%s) ) / 60 ))
+  if [ "$age_min" -lt "${CACHE_MAX_AGE_MIN:-12}" ]; then
+    if [ "$display_mode" = "v" ] && [ -f "$DESTDIR/weather-display" ]; then
+      cat "$DESTDIR/weather-display"
+      exit 0
+    elif [ "$display_mode" != "v" ]; then
       log "Cache is ${age_min}m old (< ${CACHE_MAX_AGE_MIN}m), skipping fetch"
       exit 0
     fi
@@ -182,6 +191,22 @@ fi
 # ---------- Helpers ----------
 toupper(){ tr '[:lower:]' '[:upper:]'; }
 round(){ awk -v x="$1" 'BEGIN{printf "%.0f", x+0}'; }
+
+to_cardinal(){
+  local deg idx
+  deg="$(round "$1")"
+  while [ "$deg" -lt 0 ]; do deg=$((deg + 360)); done
+  while [ "$deg" -ge 360 ]; do deg=$((deg - 360)); done
+  idx=$(( (deg * 100 + 1125) / 2250 ))
+  [ "$idx" -ge 16 ] && idx=0
+  case "$idx" in
+    0)  echo "N"   ;; 1)  echo "NNE" ;; 2)  echo "NE"  ;; 3)  echo "ENE" ;;
+    4)  echo "E"   ;; 5)  echo "ESE" ;; 6)  echo "SE"  ;; 7)  echo "SSE" ;;
+    8)  echo "S"   ;; 9)  echo "SSW" ;; 10) echo "SW"  ;; 11) echo "WSW" ;;
+    12) echo "W"   ;; 13) echo "WNW" ;; 14) echo "NW"  ;; 15) echo "NNW" ;;
+    *)  echo "N"   ;;
+  esac
+}
 
 is_icao_code(){
   local code="$1"
@@ -514,9 +539,26 @@ fetch_metar(){
   temp_f="$(awk -v c="$t_c_raw" 'BEGIN{printf "%.0f", (c*9/5)+32}')"
 
   cond="$(metar_condition_word "$metar")"
-  log "METAR: ${icao} temp=${temp_f}F cond=${cond}"
-  # format: temp_f|cond|feels_like_f|humidity (METAR does not provide feels-like or humidity)
-  echo "${temp_f}|${cond}||"
+
+  # Wind: e.g. "18005KT" (dir=180, 5kt) or "18005G13KT" (gust 13kt) or "VRB03KT"
+  local wind_field wind_dir_deg speed_gust wind_spd_kt wind_gust_kt wind_mph wind_gust_mph
+  wind_field="$(printf '%s' "$metar" | grep -oE '(VRB|[0-9]{3})[0-9]{2,3}(G[0-9]{2,3})?KT' | head -n1 || true)"
+  wind_dir_deg=""; wind_mph=""; wind_gust_mph=""
+  if [ -n "$wind_field" ]; then
+    local dir_raw="${wind_field:0:3}"
+    [ "$dir_raw" != "VRB" ] && wind_dir_deg="$((10#$dir_raw))"
+    speed_gust="${wind_field:3}"
+    speed_gust="${speed_gust%KT}"
+    wind_spd_kt="${speed_gust%%G*}"
+    if [[ "$speed_gust" == *G* ]]; then wind_gust_kt="${speed_gust#*G}"; else wind_gust_kt=""; fi
+    wind_mph="$(awk -v k="$wind_spd_kt" 'BEGIN{printf "%.0f", k*1.15078}')"
+    [ -n "$wind_gust_kt" ] && wind_gust_mph="$(awk -v k="$wind_gust_kt" 'BEGIN{printf "%.0f", k*1.15078}')"
+  fi
+
+  log "METAR: ${icao} temp=${temp_f}F cond=${cond} wind=${wind_mph:-none}mph"
+  # format: temp_f|cond|feels_like_f|humidity|wind_mph|wind_dir_deg|gust_mph
+  # (METAR does not provide feels-like or humidity)
+  echo "${temp_f}|${cond}|||${wind_mph}|${wind_dir_deg}|${wind_gust_mph}"
 }
 
 # ---------- Provider: Open-Meteo ----------
@@ -546,30 +588,36 @@ fetch_openmeteo(){
   lat="${coords%%|*}"
   lon="${coords##*|}"
 
-  local data temp code isday feels humidity
+  local data temp code isday feels humidity wind_speed wind_dir wind_gust
   data="$(curl -fsS --connect-timeout 15 \
-    "https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,is_day&temperature_unit=fahrenheit&timezone=auto" \
+    "https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m,wind_gusts_10m&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto" \
     2>/dev/null || true)"
 
   [ -z "$data" ] && { log "OpenMeteo: empty response for $location"; return 1; }
 
-  temp="$(echo "$data"    | grep -oP '"temperature_2m":\K[-0-9.]+' | head -n1 || true)"
-  feels="$(echo "$data"   | grep -oP '"apparent_temperature":\K[-0-9.]+' | head -n1 || true)"
-  humidity="$(echo "$data"| grep -oP '"relative_humidity_2m":\K[0-9]+' | head -n1 || true)"
-  code="$(echo "$data"    | grep -oP '"weather_code":\K[0-9]+' | head -n1 || true)"
-  isday="$(echo "$data"   | grep -oP '"is_day":\K[01]' | head -n1 || true)"
+  temp="$(echo "$data"      | grep -oP '"temperature_2m":\K[-0-9.]+' | head -n1 || true)"
+  feels="$(echo "$data"     | grep -oP '"apparent_temperature":\K[-0-9.]+' | head -n1 || true)"
+  humidity="$(echo "$data"  | grep -oP '"relative_humidity_2m":\K[0-9]+' | head -n1 || true)"
+  code="$(echo "$data"      | grep -oP '"weather_code":\K[0-9]+' | head -n1 || true)"
+  isday="$(echo "$data"     | grep -oP '"is_day":\K[01]' | head -n1 || true)"
+  wind_speed="$(echo "$data"| grep -oP '"wind_speed_10m":\K[-0-9.]+' | head -n1 || true)"
+  wind_dir="$(echo "$data"  | grep -oP '"wind_direction_10m":\K[-0-9.]+' | head -n1 || true)"
+  wind_gust="$(echo "$data" | grep -oP '"wind_gusts_10m":\K[-0-9.]+' | head -n1 || true)"
 
   [ -z "$temp" ] && { log "OpenMeteo: could not parse temperature for $location"; return 1; }
 
-  local tf fl
+  local tf fl wm wd wg
   tf="$(round "$temp")"
   fl="$([ -n "$feels" ] && round "$feels" || echo "")"
+  wm="$([ -n "$wind_speed" ] && round "$wind_speed" || echo "")"
+  wd="$([ -n "$wind_dir" ] && round "$wind_dir" || echo "")"
+  wg="$([ -n "$wind_gust" ] && round "$wind_gust" || echo "")"
   [ -z "$isday" ] && isday="1"
   local cond
   cond="$(openmeteo_condition_word "${code:-0}" "${isday}")"
 
-  log "OpenMeteo: $location temp=${tf}F feels=${fl}F humidity=${humidity}% cond=${cond}"
-  echo "${tf}|${cond}|${fl}|${humidity}"
+  log "OpenMeteo: $location temp=${tf}F feels=${fl}F humidity=${humidity}% cond=${cond} wind=${wm}mph"
+  echo "${tf}|${cond}|${fl}|${humidity}|${wm}|${wd}|${wg}"
 }
 
 # ---------- Provider: WeatherFlow Tempest ----------
@@ -604,21 +652,27 @@ fetch_tempest(){
 
   [ -z "$data" ] && { log "Tempest: empty response for station $station"; return 1; }
 
-  local temp feels humidity cond_text cond
-  temp="$(echo "$data"     | grep -oP '"air_temperature":\K[-0-9.]+' | head -n1 || true)"
-  feels="$(echo "$data"    | grep -oP '"feels_like":\K[-0-9.]+' | head -n1 || true)"
-  humidity="$(echo "$data" | grep -oP '"relative_humidity":\K[0-9]+' | head -n1 || true)"
-  cond_text="$(echo "$data"| grep -oP '"conditions":"\K[^"]+' | head -n1 || true)"
+  local temp feels humidity cond_text cond wind_speed wind_dir wind_gust
+  temp="$(echo "$data"      | grep -oP '"air_temperature":\K[-0-9.]+' | head -n1 || true)"
+  feels="$(echo "$data"     | grep -oP '"feels_like":\K[-0-9.]+' | head -n1 || true)"
+  humidity="$(echo "$data"  | grep -oP '"relative_humidity":\K[0-9]+' | head -n1 || true)"
+  cond_text="$(echo "$data" | grep -oP '"conditions":"\K[^"]+' | head -n1 || true)"
+  wind_speed="$(echo "$data"| grep -oP '"wind_avg":\K[-0-9.]+' | head -n1 || true)"
+  wind_dir="$(echo "$data"  | grep -oP '"wind_direction":\K[-0-9.]+' | head -n1 || true)"
+  wind_gust="$(echo "$data" | grep -oP '"wind_gust":\K[-0-9.]+' | head -n1 || true)"
 
   [ -z "$temp" ] && { log "Tempest: could not parse temperature for station $station"; return 1; }
 
-  local tf fl
+  local tf fl wm wd wg
   tf="$(round "$temp")"
   fl="$([ -n "$feels" ] && round "$feels" || echo "")"
+  wm="$([ -n "$wind_speed" ] && round "$wind_speed" || echo "")"
+  wd="$([ -n "$wind_dir" ] && round "$wind_dir" || echo "")"
+  wg="$([ -n "$wind_gust" ] && round "$wind_gust" || echo "")"
   cond="$(tempest_condition_word "${cond_text:-clear}")"
 
-  log "Tempest: station=$station temp=${tf}F feels=${fl}F humidity=${humidity}% cond=${cond} raw_cond='${cond_text}'"
-  echo "${tf}|${cond}|${fl}|${humidity}"
+  log "Tempest: station=$station temp=${tf}F feels=${fl}F humidity=${humidity}% cond=${cond} wind=${wm}mph raw_cond='${cond_text}'"
+  echo "${tf}|${cond}|${fl}|${humidity}|${wm}|${wd}|${wg}"
 }
 
 # ---------- Main ----------
@@ -664,13 +718,8 @@ if [ -z "$result" ]; then
   exit 1
 fi
 
-# Parse result: temp_f|cond|feels_like_f|humidity
-temp_f="${result%%|*}"
-rest="${result#*|}"
-cond="${rest%%|*}"
-rest="${rest#*|}"
-feels_f="${rest%%|*}"
-humidity="${rest##*|}"
+# Parse result: temp_f|cond|feels_like_f|humidity|wind_mph|wind_dir_deg|gust_mph
+IFS='|' read -r temp_f cond feels_f humidity wind_mph wind_dir gust_mph <<< "$result"
 
 ctemp="$(awk -v f="$temp_f" 'BEGIN{printf "%.0f", (f-32)*5/9}')"
 
@@ -681,11 +730,31 @@ else
   feels_c=""
 fi
 
+# ---------- Build Display Line (Supermon-compatible) ----------
+cond_display="$(echo "$cond" | sed -e 's/\b\(.\)/\u\1/g')"
+display_line="${temp_f}°F, ${ctemp}°C"
+[ -n "$humidity" ] && display_line="${display_line}, ${humidity}% RH"
+display_line="${display_line} / ${cond_display}"
+if [ -n "$wind_mph" ] && [ "$wind_mph" != "0" ]; then
+  wind_dir_word=""
+  [ -n "$wind_dir" ] && wind_dir_word="$(to_cardinal "$wind_dir")"
+  wind_part="Wind ${wind_mph} mph"
+  [ -n "$wind_dir_word" ] && wind_part="${wind_part} ${wind_dir_word}"
+  if [ -n "$gust_mph" ] && [ "$gust_mph" -gt "$wind_mph" ] 2>/dev/null; then
+    wind_part="${wind_part} (gust ${gust_mph})"
+  fi
+  display_line="${display_line}, ${wind_part}"
+fi
+
 # ---------- Output ----------
 if [ "$display_mode" = "v" ]; then
-  echo "${temp_f}°F, ${ctemp}°C / ${cond}"
-  [ -n "$feels_f" ] && echo "Feels like: ${feels_f}°F, ${feels_c}°C"
-  [ -n "$humidity" ] && echo "Humidity: ${humidity}%"
+  # Single-line output — Supermon reads this via PHP exec() which returns only
+  # the last line, so verbose mode must always be exactly one line.
+  echo "$display_line" > "$DESTDIR/weather-display.new" 2>/dev/null && \
+    mv "$DESTDIR/weather-display.new" "$DESTDIR/weather-display" 2>/dev/null || true
+  echo "$display_line"
+  # Log extra detail for debugging without breaking the single-line guarantee
+  [ -n "$feels_f" ] && log "Feels like: ${feels_f}°F, ${feels_c}°C"
   exit 0
 fi
 
@@ -718,6 +787,10 @@ fi
 if [ "${process_condition:-YES}" = "YES" ]; then
   write_condition_gsm "$cond"
 fi
+
+# Write one-line display string so Supermon can serve it from cache without an API call
+echo "$display_line" > "$DESTDIR/weather-display.new" && \
+  mv "$DESTDIR/weather-display.new" "$DESTDIR/weather-display" 2>/dev/null || true
 
 log "Weather written: temp=${temp_f}F cond=${cond}"
 exit 0
