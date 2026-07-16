@@ -134,7 +134,7 @@ CONFIG_PATHS=(
   "/etc/asterisk/local/weather.ini"
   "/etc/asterisk/weather.ini"
   "/usr/local/etc/weather.ini"
-  "$HOME/.weather.ini"
+  "${HOME:-}/.weather.ini"
 )
 
 if [ -n "$opt_config_file" ]; then
