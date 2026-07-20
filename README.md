@@ -9,6 +9,10 @@
 
 ---
 
+> ℹ️ **Note:** This project's functionality has been incorporated into [**ASL3-Herald**](https://github.com/N6LKA/ASL3-Herald) as its built-in **Time & Weather Announcements** feature — with enhancements like on-demand DTMF triggering, independent time/weather/greeting toggles, and optional integration with SkywarnPlus's already-fetched weather data (no duplicate polling). This standalone project remains available for anyone who prefers it.
+
+---
+
 An automated top-of-the-hour time and current weather conditions announcement system for [AllStar](https://allstarlink.org/) nodes running ASL3 on Debian.
 
 Supports US ZIP codes, ICAO airport codes, Canadian postal codes, international locations, and personal WeatherFlow Tempest weather stations.
